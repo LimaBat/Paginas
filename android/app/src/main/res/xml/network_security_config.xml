@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- o app roda um servidor local no próprio celular (http://127.0.0.1); o resto da internet continua em https -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+    <!-- alguns endereços de texto do Projeto Gutenberg ainda começam com http:// e redirecionam para https -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">gutenberg.org</domain>
+    </domain-config>
+</network-security-config>

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Páginas: hábito de leitura e biblioteca virtual</title>
+<meta name="description" content="Crie o hábito de ler: metas diárias, milhares de livros gratuitos para ler no app e uma IA que explica os trechos difíceis. Para Windows e Android.">
+<link rel="icon" href="icone.png">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,700;1,700&family=Nunito:wght@400;600;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="estilo.css"></head>
+<body><main>
+<header><img src="icone.png" alt=""><div><b>Páginas</b><small>Hábito de leitura e biblioteca virtual</small></div></header>
+<h1>Leia um pouco <em>todo dia</em>.<br>O resto vem sozinho.</h1>
+<p class="sub">Metas pequenas, sequência de dias, milhares de livros gratuitos para ler dentro do app e uma inteligência artificial que explica qualquer palavra ou frase difícil. De graça, para Windows e Android.</p>
+<div class="bts">
+  <a class="btn" id="bWin" href="https://github.com/LimaBat/paginas/releases/latest/download/Paginas.bat">⬇ Baixar para Windows<small>Paginas.bat</small></a>
+  <a class="btn" id="bAnd" href="https://github.com/LimaBat/paginas/releases/latest/download/Paginas.apk">⬇ Baixar para Android<small>Paginas.apk</small></a>
+</div>
+<p class="nota" id="ver">Sempre a versão mais nova. Os dois sincronizam pela sua conta Google.</p>
+
+<details class="card"><summary>Como instalar no Windows</summary>
+<ol>
+<li>Clique em <b>Baixar para Windows</b>. Se o navegador perguntar, escolha <b>Manter</b>.</li>
+<li>Dê dois cliques em <b>Paginas.bat</b>. Se aparecer "O Windows protegeu o computador", clique em <b>Mais informações &gt; Executar assim mesmo</b>.</li>
+<li>Pronto: o Páginas abre numa janela própria e cria um atalho na Área de Trabalho e no menu Iniciar. Não precisa instalar mais nada.</li>
+</ol></details>
+<details class="card"><summary>Como instalar no Android</summary>
+<ol>
+<li>No celular, toque em <b>Baixar para Android</b> e abra o arquivo <b>Paginas.apk</b> quando o download terminar.</li>
+<li>Se aparecer "Por segurança, seu telefone não tem permissão para instalar apps desta fonte", toque em <b>Configurações</b>, ative <b>Permitir desta fonte</b> e volte.</li>
+<li>Toque em <b>Instalar</b>. Se o Google Play Protect avisar sobre um app desconhecido, toque em <b>Mais detalhes &gt; Instalar mesmo assim</b>.</li>
+</ol>
+<p class="nota" style="margin:8px 0 0">Funciona no Android 8 ou mais novo. O app avisa quando sair uma versão nova.</p></details>
+
+<div class="cards">
+<div class="card"><span class="e">🔥</span><b>Hábito que pega</b>Meta diária em minutos ou páginas, cronômetro de leitura, sequência de dias e dias de descanso que não quebram a sequência.</div>
+<div class="card"><span class="e">📚</span><b>Biblioteca virtual</b>Milhares de livros em domínio público do Projeto Gutenberg para ler dentro do app, inclusive clássicos brasileiros.</div>
+<div class="card"><span class="e">✨</span><b>IA que explica</b>Selecione uma palavra ou frase e a IA diz o que significa no contexto. Já vem pronta, sem configurar nada.</div>
+<div class="card"><span class="e">🖍</span><b>Grifos e anotações</b>Grife trechos, guarde as explicações e volte a elas quando quiser.</div>
+<div class="card"><span class="e">💡</span><b>Feito para você</b>Recomendações pelos seus gostos, curiosidades e quizzes sobre livros e autores.</div>
+<div class="card"><span class="e">☁️</span><b>Conta Google</b>Entre com o Google e continue a leitura no computador ou no celular, com tudo sincronizado.</div>
+</div>
+
+<footer><a href="privacidade.html">Política de Privacidade</a><a href="termos.html">Termos de Uso</a><a href="https://github.com/LimaBat/paginas/issues">Contato</a><a href="https://github.com/LimaBat/paginas/releases">Todas as versões</a></footer>
+</main>
+<script>
+(function () {
+  var ua = navigator.userAgent, and = /Android/i.test(ua);
+  document.getElementById(and ? 'bAnd' : 'bWin').classList.add('principal');
+  if (and) { var a = document.getElementById('bAnd'); a.parentNode.insertBefore(a, a.parentNode.firstChild); }
+  fetch('https://api.github.com/repos/LimaBat/paginas/releases/latest').then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+    if (j && j.tag_name) document.getElementById('ver').textContent = 'Versão ' + j.tag_name.replace(/^v/i, '') + '. Os dois sincronizam pela sua conta Google.';
+  }).catch(function () {});
+})();
+</script>
+</body></html>

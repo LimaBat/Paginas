@@ -1,0 +1,41 @@
+plugins {
+    id 'com.android.application'
+}
+
+// a versão vem da publicação (ex.: -PversaoNome=1.2 -PversaoCodigo=10200)
+def versaoNome = (project.findProperty('versaoNome') ?: '1.0').toString()
+def versaoCodigo = (project.findProperty('versaoCodigo') ?: '1').toString().toInteger()
+
+android {
+    namespace 'br.paginas.app'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'br.paginas.app'
+        minSdk 26
+        targetSdk 35
+        versionCode versaoCodigo
+        versionName versaoNome
+    }
+
+    signingConfigs {
+        release {
+            if (System.getenv('ANDROID_KEYSTORE')) {
+                storeFile file(System.getenv('ANDROID_KEYSTORE'))
+                storePassword System.getenv('ANDROID_KEYSTORE_SENHA')
+                keyAlias System.getenv('ANDROID_KEY_ALIAS') ?: 'paginas'
+                keyPassword System.getenv('ANDROID_KEYSTORE_SENHA')
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig System.getenv('ANDROID_KEYSTORE') ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

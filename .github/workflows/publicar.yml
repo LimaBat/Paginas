@@ -1,0 +1,131 @@
+# Gera o Paginas.bat (Windows) e o Paginas.apk (Android), testa os dois e publica numa Release.
+# Para publicar uma versão: no GitHub, Releases > Draft a new release > crie a tag (v1.0, v1.1...) > Publish.
+# Os arquivos são gerados e anexados à release em uns 10 minutos. Envios para a main e "Run workflow" só geram e testam.
+name: Publicar versão
+on:
+  release:
+    types: [published]
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+  workflow_dispatch:
+permissions:
+  contents: write
+env:
+  IA_PROXY_URL: ${{ secrets.IA_PROXY_URL }}
+  IA_PROXY_TOKEN: ${{ secrets.IA_PROXY_TOKEN }}
+  GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+  GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+  ATUALIZA_REPO: ${{ github.repository }}
+  VERSAO: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Preparar o Paginas.bat
+        run: python ferramentas/preparar.py
+      - name: Conferir o código PowerShell
+        shell: powershell
+        run: |
+          $f = [IO.File]::ReadAllText((Resolve-Path build\Paginas.bat), [Text.Encoding]::UTF8).Replace([string][char]13, '')
+          $a = "#PS_START`n"; $i = $f.IndexOf($a) + $a.Length; $j = $f.IndexOf("`n::HTML_START")
+          $err = $null
+          [void][System.Management.Automation.Language.Parser]::ParseInput($f.Substring($i, $j - $i), [ref]$null, [ref]$err)
+          if ($err) { $err | ForEach-Object { Write-Host "::error::PowerShell: $($_.Message) (linha $($_.Extent.StartLineNumber))" }; exit 1 }
+          Write-Host "PowerShell sem erros de sintaxe"
+      - name: Testar o programa (abre sem janela e responde)
+        shell: powershell
+        run: |
+          $env:PAGINAS_TESTE = Join-Path $env:RUNNER_TEMP 'paginas.txt'
+          Start-Process cmd.exe -ArgumentList '/c', (Resolve-Path build\Paginas.bat).Path
+          for ($k = 0; $k -lt 60 -and -not (Test-Path $env:PAGINAS_TESTE); $k++) { Start-Sleep 1 }
+          if (-not (Test-Path $env:PAGINAS_TESTE)) { Get-Content "$env:LOCALAPPDATA\Paginas\erro.log" -ErrorAction SilentlyContinue; throw "o programa não abriu" }
+          $porta, $tk = (Get-Content $env:PAGINAS_TESTE).Split(' ')
+          $b = "http://127.0.0.1:$porta"
+          $h = Invoke-WebRequest "$b/" -UseBasicParsing
+          if (-not $h.Content.Contains('const API') -or $h.Content.Contains("token: '__TOKEN__'")) { throw "pagina inicial errada" }
+          $c = Invoke-RestMethod "$b/api/config?t=$tk"; Write-Host "config: $($c | ConvertTo-Json -Compress)"
+          $g = Invoke-RestMethod "$b/api/google/status?t=$tk"; Write-Host "google: $($g | ConvertTo-Json -Compress)"
+          Invoke-RestMethod "$b/api/save?t=$tk" -Method Post -Body '{"books":[],"logs":[],"mod":1}' -ContentType 'application/json' | Out-Null
+          $d = Invoke-RestMethod "$b/api/load?t=$tk"; if ($d.mod -ne 1) { throw "salvar/abrir dados falhou" }
+          try { $cat = Invoke-RestMethod "$b/api/catalog?t=$tk&search=machado" -TimeoutSec 60; Write-Host "catalogo: $($cat.count) livros" } catch { Write-Host "::warning::Gutendex nao respondeu no teste" }
+          if ($env:IA_PROXY_URL) {
+            try {
+              $ia = Invoke-RestMethod "$b/api/ai?t=$tk" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes('{"text":"outrem","context":"amar a outrem como a si mesmo","title":"Dom Casmurro","author":"Machado de Assis"}'))
+              Write-Host "IA: $($ia.text)"
+            } catch { Write-Host "::warning::A IA não respondeu no teste: $($_.Exception.Message)" }
+          } else { Write-Host "::warning::Sem o segredo IA_PROXY_URL: a IA não vai funcionar nesta versão." }
+          if (-not $env:GOOGLE_CLIENT_ID) { Write-Host "::warning::Sem os segredos GOOGLE_CLIENT_ID/SECRET: o login com Google fica desativado." }
+          try { Invoke-RestMethod "$b/api/bye?t=$tk" | Out-Null } catch {}
+          Write-Host "TESTE DO WINDOWS OK"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: build/Paginas.bat
+      - name: Anexar à release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: build/Paginas.bat
+  android:
+    runs-on: ubuntu-24.04   # já vem com o Android SDK instalado
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+      - name: Preparar o código
+        run: |
+          python3 ferramentas/preparar.py
+          V="${VERSAO#v}"; V="${V#V}"; [ -z "$V" ] && V="0.0.${{ github.run_number }}"
+          IFS=. read -r A B C <<< "$V"
+          echo "VNOME=$V" >> $GITHUB_ENV
+          echo "VCOD=$(( ${A:-0}*10000 + ${B:-0}*100 + ${C:-0} ))" >> $GITHUB_ENV
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - name: Gerar APK de teste
+        run: bash ferramentas/gradle_com_log.sh -p android assembleDebug -PversaoNome=$VNOME -PversaoCodigo=$VCOD --stacktrace
+      - name: Ligar a aceleração do emulador
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Testar no emulador
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: google_apis
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: bash ferramentas/testar_android.sh
+      - name: Gerar o APK final
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_SENHA: ${{ secrets.ANDROID_KEYSTORE_SENHA }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/paginas.keystore"; export ANDROID_KEYSTORE="$RUNNER_TEMP/paginas.keystore"; else echo "::warning::Sem a chave de assinatura (ANDROID_KEYSTORE_BASE64): o APK sai com assinatura de teste e as atualizações vão pedir para desinstalar antes"; fi
+          bash ferramentas/gradle_com_log.sh -p android assembleRelease -PversaoNome=$VNOME -PversaoCodigo=$VCOD
+          cp android/app/build/outputs/apk/release/app-release.apk Paginas.apk
+          ls -la Paginas.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: Paginas.apk
+      - name: Anexar à release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: Paginas.apk
