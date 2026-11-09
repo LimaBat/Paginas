@@ -27,7 +27,7 @@ Os valores ficam no painel da Cloudflare (Workers > investe-ai-ia > Settings) e 
 **Sobre o Google:**
 - Pode usar o mesmo cliente do Investe.AI. Clientes do tipo "App para computador" aceitam qualquer porta do `127.0.0.1`, então não há nada para cadastrar.
 - A tela de permissão do Google vai mostrar o nome do projeto do Google Cloud (o do Investe.AI). Se quiser que apareça "Páginas", crie um projeto novo, ative a **Google Drive API**, configure a tela de consentimento com os escopos `email`, `profile`, `openid` e `.../auth/drive.appdata`, crie um cliente "App para computador" e use esse ID e segredo.
-- Enquanto o app do Google estiver em modo **Teste**, só os e-mails cadastrados em "Usuários de teste" conseguem entrar. Para liberar para todo mundo, use **Publicar app**. Os links de privacidade e termos que o Google pede são `https://limabat.github.io/paginas/privacidade.html` e `https://limabat.github.io/paginas/termos.html`.
+- Enquanto o app do Google estiver em modo **Teste**, só os e-mails cadastrados em "Usuários de teste" conseguem entrar. Para liberar para todo mundo, use **Publicar app**. Os links de privacidade e termos que o Google pede são `https://limabat.github.io/Paginas/privacidade.html` e `https://limabat.github.io/Paginas/termos.html`.
 
 **Assinatura do APK (recomendado):** sem ela, cada versão sai com uma assinatura de teste diferente, e o Android só instala a nova depois de desinstalar a antiga. Crie também:
 
@@ -46,7 +46,7 @@ e convertê-la no PowerShell com `[Convert]::ToBase64String([IO.File]::ReadAllBy
 **Settings > Pages**: em "Source" escolha **Deploy from a branch**, branch **main**, pasta **/docs**, e salve. Em um ou dois minutos o site fica em:
 
 ```
-https://limabat.github.io/paginas/
+https://limabat.github.io/Paginas/
 ```
 
 ## 3. Publicar uma versão
@@ -60,8 +60,8 @@ https://limabat.github.io/paginas/
 Links diretos (sempre a versão mais nova), os mesmos dos botões do site:
 
 ```
-https://github.com/LimaBat/paginas/releases/latest/download/Paginas.bat
-https://github.com/LimaBat/paginas/releases/latest/download/Paginas.apk
+https://github.com/LimaBat/Paginas/releases/latest/download/Paginas.bat
+https://github.com/LimaBat/Paginas/releases/latest/download/Paginas.apk
 ```
 
 ## 4. Atualizações

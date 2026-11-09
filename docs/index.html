@@ -11,8 +11,8 @@
 <h1>Leia um pouco <em>todo dia</em>.<br>O resto vem sozinho.</h1>
 <p class="sub">Metas pequenas, sequência de dias, milhares de livros gratuitos para ler dentro do app e uma inteligência artificial que explica qualquer palavra ou frase difícil. De graça, para Windows e Android.</p>
 <div class="bts">
-  <a class="btn" id="bWin" href="https://github.com/LimaBat/paginas/releases/latest/download/Paginas.bat">⬇ Baixar para Windows<small>Paginas.bat</small></a>
-  <a class="btn" id="bAnd" href="https://github.com/LimaBat/paginas/releases/latest/download/Paginas.apk">⬇ Baixar para Android<small>Paginas.apk</small></a>
+  <a class="btn" id="bWin" href="https://github.com/LimaBat/Paginas/releases/latest/download/Paginas.bat">⬇ Baixar para Windows<small>Paginas.bat</small></a>
+  <a class="btn" id="bAnd" href="https://github.com/LimaBat/Paginas/releases/latest/download/Paginas.apk">⬇ Baixar para Android<small>Paginas.apk</small></a>
 </div>
 <p class="nota" id="ver">Sempre a versão mais nova. Os dois sincronizam pela sua conta Google.</p>
 
@@ -39,14 +39,14 @@
 <div class="card"><span class="e">☁️</span><b>Conta Google</b>Entre com o Google e continue a leitura no computador ou no celular, com tudo sincronizado.</div>
 </div>
 
-<footer><a href="privacidade.html">Política de Privacidade</a><a href="termos.html">Termos de Uso</a><a href="https://github.com/LimaBat/paginas/issues">Contato</a><a href="https://github.com/LimaBat/paginas/releases">Todas as versões</a></footer>
+<footer><a href="privacidade.html">Política de Privacidade</a><a href="termos.html">Termos de Uso</a><a href="https://github.com/LimaBat/Paginas/issues">Contato</a><a href="https://github.com/LimaBat/Paginas/releases">Todas as versões</a></footer>
 </main>
 <script>
 (function () {
   var ua = navigator.userAgent, and = /Android/i.test(ua);
   document.getElementById(and ? 'bAnd' : 'bWin').classList.add('principal');
   if (and) { var a = document.getElementById('bAnd'); a.parentNode.insertBefore(a, a.parentNode.firstChild); }
-  fetch('https://api.github.com/repos/LimaBat/paginas/releases/latest').then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+  fetch('https://api.github.com/repos/LimaBat/Paginas/releases/latest').then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
     if (j && j.tag_name) document.getElementById('ver').textContent = 'Versão ' + j.tag_name.replace(/^v/i, '') + '. Os dois sincronizam pela sua conta Google.';
   }).catch(function () {});
 })();
