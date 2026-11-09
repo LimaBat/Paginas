@@ -53,7 +53,7 @@ jobs:
           $g = Invoke-RestMethod "$b/api/google/status?t=$tk"; Write-Host "google: $($g | ConvertTo-Json -Compress)"
           Invoke-RestMethod "$b/api/save?t=$tk" -Method Post -Body '{"books":[],"logs":[],"mod":1}' -ContentType 'application/json' | Out-Null
           $d = Invoke-RestMethod "$b/api/load?t=$tk"; if ($d.mod -ne 1) { throw "salvar/abrir dados falhou" }
-          try { $cat = Invoke-RestMethod "$b/api/catalog?t=$tk&search=machado" -TimeoutSec 60; Write-Host "catalogo: $($cat.count) livros" } catch { $m = $_.Exception.Message; try { $m += " " + (New-Object IO.StreamReader($_.Exception.Response.GetResponseStream())).ReadToEnd() } catch {}; Write-Host "::warning::Gutendex nao respondeu no teste: $m" }
+          try { $cat = Invoke-RestMethod "$b/api/catalog?t=$tk&search=machado" -TimeoutSec 60; Write-Host "catalogo: $($cat.count) livros" } catch { $m = "$($_.Exception.Message) $($_.ErrorDetails.Message)"; try { $d2 = Invoke-WebRequest "https://gutendex.com/books/?search=machado" -UseBasicParsing -TimeoutSec 60; $m += " | direto: HTTP $($d2.StatusCode)" } catch { $m += " | direto: $($_.Exception.Message)" }; Write-Host "::warning::Gutendex nao respondeu no teste: $m" }
           if ($env:IA_PROXY_URL) {
             try {
               $ia = Invoke-RestMethod "$b/api/ai?t=$tk" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes('{"text":"outrem","context":"amar a outrem como a si mesmo","title":"Dom Casmurro","author":"Machado de Assis"}'))
