@@ -47,7 +47,7 @@ jobs:
           Add-Type -AssemblyName System.Drawing
           $ic = [System.Drawing.Icon]::ExtractAssociatedIcon((Resolve-Path build\Paginas.exe).Path)
           if (-not $ic) { throw "o .exe ficou sem ícone" }
-          Write-Host "Paginas.exe: $((Get-Item build\Paginas.exe).Length) bytes, ícone $($ic.Width)x$($ic.Height)"
+          Write-Host "Paginas.exe: $((Get-Item build\Paginas.exe).Length) bytes, com icone"
       - name: Testar o programa pelo .exe (abre sem janela e responde)
         shell: powershell
         run: |
@@ -55,8 +55,14 @@ jobs:
           Start-Process (Resolve-Path build\Paginas.exe).Path
           for ($k = 0; $k -lt 60 -and -not (Test-Path $env:PAGINAS_TESTE); $k++) { Start-Sleep 1 }
           if (-not (Test-Path $env:PAGINAS_TESTE)) { Get-Content "$env:LOCALAPPDATA\Paginas\erro.log" -ErrorAction SilentlyContinue; throw "o programa não abriu" }
-          $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Páginas.lnk'
-          if (Test-Path $lnk) { $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk); Write-Host "atalho: ícone = $($sc.IconLocation)"; if (-not (Test-Path ($sc.IconLocation -replace ',0$', ''))) { throw "atalho sem ícone" } } else { Write-Host "::warning::atalho da Área de Trabalho não foi criado" }
+          $nome = 'P' + [char]0x00E1 + 'ginas.lnk'
+          foreach ($pasta in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
+            $lnk = Join-Path $pasta $nome
+            if (-not (Test-Path -LiteralPath $lnk)) { throw "atalho nao foi criado em $pasta" }
+            $ico = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).IconLocation -replace ',0$', ''
+            if (-not (Test-Path -LiteralPath $ico)) { throw "atalho sem icone em $pasta" }
+            Write-Host "atalho ok em $pasta (icone: $ico)"
+          }
           Remove-Item $env:PAGINAS_TESTE
           Start-Sleep 2
           Write-Host "o .exe abriu e criou o atalho"
