@@ -38,6 +38,28 @@ jobs:
           [void][System.Management.Automation.Language.Parser]::ParseInput($f.Substring($i, $j - $i), [ref]$null, [ref]$err)
           if ($err) { $err | ForEach-Object { Write-Host "::error::PowerShell: $($_.Message) (linha $($_.Extent.StartLineNumber))" }; exit 1 }
           Write-Host "PowerShell sem erros de sintaxe"
+      - name: Gerar o Paginas.exe (com o ícone)
+        shell: powershell
+        run: |
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          & $csc /nologo /target:winexe /codepage:65001 /optimize+ /win32icon:icone.ico "/resource:build\Paginas.bat,Paginas.bat" /r:System.Windows.Forms.dll /out:build\Paginas.exe ferramentas\lancador.cs
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path build\Paginas.exe)) { throw "falha ao compilar o Paginas.exe" }
+          Add-Type -AssemblyName System.Drawing
+          $ic = [System.Drawing.Icon]::ExtractAssociatedIcon((Resolve-Path build\Paginas.exe).Path)
+          if (-not $ic) { throw "o .exe ficou sem ícone" }
+          Write-Host "Paginas.exe: $((Get-Item build\Paginas.exe).Length) bytes, ícone $($ic.Width)x$($ic.Height)"
+      - name: Testar o programa pelo .exe (abre sem janela e responde)
+        shell: powershell
+        run: |
+          $env:PAGINAS_TESTE = Join-Path $env:RUNNER_TEMP 'paginas.txt'
+          Start-Process (Resolve-Path build\Paginas.exe).Path
+          for ($k = 0; $k -lt 60 -and -not (Test-Path $env:PAGINAS_TESTE); $k++) { Start-Sleep 1 }
+          if (-not (Test-Path $env:PAGINAS_TESTE)) { Get-Content "$env:LOCALAPPDATA\Paginas\erro.log" -ErrorAction SilentlyContinue; throw "o programa não abriu" }
+          $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Páginas.lnk'
+          if (Test-Path $lnk) { $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk); Write-Host "atalho: ícone = $($sc.IconLocation)"; if (-not (Test-Path ($sc.IconLocation -replace ',0$', ''))) { throw "atalho sem ícone" } } else { Write-Host "::warning::atalho da Área de Trabalho não foi criado" }
+          Remove-Item $env:PAGINAS_TESTE
+          Start-Sleep 2
+          Write-Host "o .exe abriu e criou o atalho"
       - name: Testar o programa (abre sem janela e responde)
         shell: powershell
         run: |
@@ -66,13 +88,17 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: build/Paginas.bat
+          path: |
+            build/Paginas.exe
+            build/Paginas.bat
       - name: Anexar à release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
-          files: build/Paginas.bat
+          files: |
+            build/Paginas.exe
+            build/Paginas.bat
   android:
     runs-on: ubuntu-24.04   # já vem com o Android SDK instalado
     timeout-minutes: 45

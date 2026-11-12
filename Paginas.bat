@@ -14,6 +14,8 @@ $IA_PROXY_URL = ''
 $IA_PROXY_TOKEN = ''
 $G_CLIENT_ID = ''
 $G_CLIENT_SECRET = ''
+if ($IA_PROXY_URL -and $IA_PROXY_URL -notmatch '^https?://') { $IA_PROXY_URL = 'https://' + $IA_PROXY_URL }
+$IA_PROXY_URL = $IA_PROXY_URL.TrimEnd('/')
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $dir = Join-Path $env:LOCALAPPDATA 'Paginas'
@@ -85,7 +87,7 @@ try {
     return $bmp
   }
   function Save-Ico([string]$file) {
-    $sizes = @(16, 32, 48, 64, 256)
+    $sizes = @(16, 24, 32, 48, 64, 128, 256)
     $pngs = @()
     foreach ($z in $sizes) {
       $b = New-Logo $z
@@ -115,8 +117,12 @@ try {
   # ---- arquivos do icone, launcher oculto e atalhos (sem janela preta) ----
   $icoFile = Join-Path $dir 'paginas.ico'
   $pngFile = Join-Path $dir 'icone.png'
+  $flag = Join-Path $dir 'atalho.ok'
+  $flagTxt = ''
+  try { if (Test-Path -LiteralPath $flag) { $flagTxt = [IO.File]::ReadAllText($flag).Trim() } } catch { }
+  $versaoNova = $flagTxt -ne $APP_VERSAO   # primeira vez ou versao nova: refaz o icone e os atalhos
   try {
-    if (-not (Test-Path -LiteralPath $icoFile)) { Save-Ico $icoFile }
+    if ($versaoNova -or -not (Test-Path -LiteralPath $icoFile)) { Save-Ico $icoFile }
     if (-not (Test-Path -LiteralPath $pngFile)) { $lb = New-Logo 128; $lb.Save($pngFile, [System.Drawing.Imaging.ImageFormat]::Png); $lb.Dispose() }
   } catch { }
   try {
@@ -136,12 +142,15 @@ $f=[IO.File]::ReadAllText($env:PAGINAS_SELF,[Text.Encoding]::UTF8).Replace([stri
     $vb = 'Set sh = CreateObject("WScript.Shell")' + "`r`n" + 'sh.Environment("Process")("PAGINAS_SELF") = "' + $appBat + '"' + "`r`n" + 'sh.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command ""' + $psCmd.Trim() + '""", 0, False' + "`r`n"
     $vbsFile = Join-Path $dir 'abrir.vbs'
     [IO.File]::WriteAllText($vbsFile, $vb, [Text.Encoding]::Unicode)
-    $flag = Join-Path $dir 'atalho.ok'
-    if (-not (Test-Path -LiteralPath $flag)) {
+    if ($versaoNova) {
       $wsh = New-Object -ComObject WScript.Shell
-      foreach ($folder in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
+      $desk = [Environment]::GetFolderPath('Desktop')
+      foreach ($folder in @($desk, [Environment]::GetFolderPath('Programs'))) {
         if ($folder -and (Test-Path -LiteralPath $folder)) {
-          $lnk = $wsh.CreateShortcut((Join-Path $folder 'Páginas.lnk'))
+          $lnkPath = Join-Path $folder 'Páginas.lnk'
+          # na Area de Trabalho: cria na primeira vez; depois so atualiza o atalho que ainda existe (respeita quem apagou)
+          if ($folder -eq $desk -and $flagTxt -and -not (Test-Path -LiteralPath $lnkPath)) { continue }
+          $lnk = $wsh.CreateShortcut($lnkPath)
           $lnk.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
           $lnk.Arguments = '"' + $vbsFile + '"'
           $lnk.WorkingDirectory = $dir
@@ -150,7 +159,9 @@ $f=[IO.File]::ReadAllText($env:PAGINAS_SELF,[Text.Encoding]::UTF8).Replace([stri
           $lnk.Save()
         }
       }
-      [IO.File]::WriteAllText($flag, 'ok', $utf8)
+      [IO.File]::WriteAllText($flag, $APP_VERSAO, $utf8)
+      # pede ao Windows para redesenhar os icones (sem isso, as vezes fica o icone antigo em cache)
+      try { $ie = Join-Path $env:WINDIR 'System32\ie4uinit.exe'; if (Test-Path -LiteralPath $ie) { [void](Start-Process -FilePath $ie -ArgumentList '-show' -WindowStyle Hidden) } } catch { }
     }
   } catch { }
 

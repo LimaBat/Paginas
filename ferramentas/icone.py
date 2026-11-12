@@ -44,4 +44,5 @@ if __name__ == "__main__":
     logo(256).save(os.path.join(RAIZ, "docs", "icone.png"))
     logo(512).save(os.path.join(RAIZ, "docs", "icone-512.png"))
     logo(128).save(os.path.join(RAIZ, "icone.png"))
+    logo(256).save(os.path.join(RAIZ, "icone.ico"), sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
     print("ícones gerados")

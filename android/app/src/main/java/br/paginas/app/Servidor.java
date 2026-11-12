@@ -42,7 +42,8 @@ public class Servidor {
         if (dist == null) dist = new HashMap<>();
         versao = txt(dist.get("versao")).isEmpty() ? "1.0" : txt(dist.get("versao"));
         repo = txt(dist.get("repo"));
-        proxyUrl = txt(dist.get("iaProxyUrl")).replaceAll("/+$", "");
+        String pu = txt(dist.get("iaProxyUrl")).replaceAll("/+$", "");
+        proxyUrl = pu.isEmpty() || pu.matches("(?i)^https?://.*") ? pu : "https://" + pu;
         proxyToken = txt(dist.get("iaProxyToken"));
         gId = txt(dist.get("googleClientId"));
         gSecret = txt(dist.get("googleClientSecret"));

@@ -39,6 +39,10 @@ for chave, nome in nomes.items():
     else:
         cfg[chave] = m.group(1).replace("''", "'")  # mantém o que está no arquivo
 
+if cfg["iaProxyUrl"] and not re.match(r"https?://", cfg["iaProxyUrl"]):
+    cfg["iaProxyUrl"] = "https://" + cfg["iaProxyUrl"]
+    m = re.search(r"^\$IA_PROXY_URL = '.*'$", src, re.M)
+    src = src[:m.start()] + "$IA_PROXY_URL = '" + cfg["iaProxyUrl"].replace("'", "''") + "'" + src[m.end():]
 if not cfg["iaProxyUrl"]: print("AVISO: sem IA_PROXY_URL: a IA só funciona se a pessoa colocar a própria chave em Ajustes.")
 if not (cfg["googleClientId"] and cfg["googleClientSecret"]): print("AVISO: sem GOOGLE_CLIENT_ID/SECRET: o login com Google fica desativado.")
 

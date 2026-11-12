@@ -2,7 +2,8 @@
 
 Este projeto gera automaticamente, na nuvem do GitHub e de graça:
 
-- **Paginas.bat**: Windows. Um arquivo só: abre com dois cliques, sem instalar nada, e cria o atalho com o ícone.
+- **Paginas.exe**: Windows, com o ícone do Páginas. Abre com dois cliques, sem instalar nada, e cria o atalho com o ícone na Área de Trabalho.
+- **Paginas.bat**: o mesmo programa em texto (é o que o botão "Atualizar agora" baixa).
 - **Paginas.apk**: o app para Android (8 ou mais novo).
 - **O site de download** (pasta `docs`), com os dois botões, a Política de Privacidade e os Termos de Uso.
 
@@ -55,12 +56,12 @@ https://limabat.github.io/Paginas/
 2. Em "Choose a tag", digite `v1.0` (depois `v1.1`, `v1.2`...) e confirme "Create new tag".
 3. Escreva um título e uma descrição curta. A primeira linha da descrição aparece no aviso de versão nova dentro do app.
 4. **Publish release**.
-5. Em uns 15 minutos, a aba **Actions** termina e a release passa a ter `Paginas.bat` e `Paginas.apk`. Antes de anexar, o programa do Windows é aberto e testado, e o app Android é instalado e aberto num emulador.
+5. Em uns 15 minutos, a aba **Actions** termina e a release passa a ter `Paginas.exe`, `Paginas.bat` e `Paginas.apk`. Antes de anexar, o programa do Windows é aberto e testado, e o app Android é instalado e aberto num emulador.
 
 Links diretos (sempre a versão mais nova), os mesmos dos botões do site:
 
 ```
-https://github.com/LimaBat/Paginas/releases/latest/download/Paginas.bat
+https://github.com/LimaBat/Paginas/releases/latest/download/Paginas.exe
 https://github.com/LimaBat/Paginas/releases/latest/download/Paginas.apk
 ```
 
@@ -76,6 +77,7 @@ https://github.com/LimaBat/Paginas/releases/latest/download/Paginas.apk
 | `Paginas.bat` | O programa inteiro: a parte em PowerShell (servidor local do Windows) e a tela (HTML) |
 | `android/` | O app Android: abre a mesma tela num WebView, com um servidor local em Java que faz o mesmo que a parte em PowerShell |
 | `ferramentas/preparar.py` | Coloca a versão, a IA e o Google no `Paginas.bat` e copia a tela para o Android antes de empacotar |
+| `ferramentas/lancador.cs` | O `Paginas.exe`: guarda o programa na pasta do app e abre sem janela preta |
 | `ferramentas/icone.py` | Desenha os ícones (o mesmo desenho do programa) |
 | `ferramentas/testar_android.sh` | Teste do APK no emulador |
 | `.github/workflows/publicar.yml` | Gera, testa e publica o `.bat` e o `.apk` a cada release |
