@@ -1,0 +1,8 @@
+name = "paginas-social"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "paginas-social"
+database_id = "COLOCADO_PELO_GITHUB_ACTIONS"

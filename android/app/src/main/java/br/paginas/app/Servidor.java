@@ -31,7 +31,7 @@ public class Servidor {
     static final List<String> PARAMS = Arrays.asList("search", "languages", "topic", "page", "sort", "ids");
 
     // configuração de distribuição (assets/config.json, gerado na publicação por ferramentas/preparar.py)
-    final String versao, repo, proxyUrl, proxyToken, gId, gSecret;
+    final String versao, repo, proxyUrl, proxyToken, gId, gSecret, socialUrl;
     static final String G_AUTH = "https://accounts.google.com/o/oauth2/v2/auth", G_TOKEN = "https://oauth2.googleapis.com/token";
     static final String G_ESCOPO = "openid email profile https://www.googleapis.com/auth/drive.appdata", DRIVE_ARQ = "paginas_dados.json";
     final Map<String, String[]> oauth = Collections.synchronizedMap(new HashMap<>());  // state -> {verificador, hora}
@@ -47,12 +47,14 @@ public class Servidor {
         proxyToken = txt(dist.get("iaProxyToken"));
         gId = txt(dist.get("googleClientId"));
         gSecret = txt(dist.get("googleClientSecret"));
+        String su = txt(dist.get("socialUrl")).replaceAll("/+$", "");
+        socialUrl = su.isEmpty() || su.matches("(?i)^https?://.*") ? su : "https://" + su;
         livros = new File(pasta, "livros");
         livros.mkdirs();
         dados = new File(pasta, "dados.json");
         dadosAnt = new File(pasta, "dados.anterior.json");
         cfgArq = new File(pasta, "config.json");
-        String h = htmlModelo.replace("__TOKEN__", token).replace("__VERSAO__", versao).replace("__REPO__", repo).replace("__PLAT__", "android");
+        String h = htmlModelo.replace("__TOKEN__", token).replace("__VERSAO__", versao).replace("__REPO__", repo).replace("__PLAT__", "android").replace("__SOCIAL__", socialUrl);
         if (extraAntesDoFim != null) {
             int i = h.lastIndexOf("</body>");
             h = i >= 0 ? h.substring(0, i) + extraAntesDoFim + h.substring(i) : h + extraAntesDoFim;
@@ -306,6 +308,7 @@ public class Servidor {
                 break;
             }
             case "/api/google/status": enviarJson(out, 200, googleStatus()); break;
+            case "/api/google/token": enviarJson(out, 200, "{\"token\":" + Json.str(acessoGoogle()) + "}"); break;
             case "/api/google/start": {
                 if (gId.isEmpty() || gSecret.isEmpty()) { enviarJson(out, 400, "{\"error\":\"O login com Google não está ativado nesta cópia do programa.\"}"); break; }
                 synchronized (oauth) { oauth.values().removeIf(v -> System.currentTimeMillis() - Long.parseLong(v[1]) > 900_000L); }

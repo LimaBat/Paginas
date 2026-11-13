@@ -162,6 +162,18 @@ public class MainActivity extends Activity {
     /** Funções que a página pode chamar (window.PaginasAndroid). */
     class Ponte {
         @JavascriptInterface
+        public void agendarReflexoes(String cfg) { Reflexoes.agendar(getApplicationContext(), cfg); }
+
+        @JavascriptInterface
+        public void reflexaoAgora() { Reflexoes.mostrar(getApplicationContext()); }
+
+        @JavascriptInterface
+        public void pedirPermissao() {
+            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
+                runOnUiThread(() -> requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 7));
+        }
+
+        @JavascriptInterface
         public String salvarBackup(String json, String nome) {
             try {
                 byte[] b = json.getBytes(StandardCharsets.UTF_8);

@@ -19,8 +19,50 @@ env:
   ATUALIZA_REPO: ${{ github.repository }}
   VERSAO: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
 jobs:
+  social:
+    # servidor da Comunidade (Cloudflare Worker + banco D1): testa e publica sozinho quando há os segredos da Cloudflare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      url: ${{ steps.pub.outputs.url }}
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Testar o servidor social
+        run: node servidor-social/teste/teste.mjs
+      - name: Publicar na Cloudflare
+        id: pub
+        if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
+        working-directory: servidor-social
+        run: |
+          set -e
+          W="npx --yes wrangler@4"
+          ID=$($W d1 list --json 2>/dev/null | python3 -c "import json,sys; print(next((d['uuid'] for d in json.load(sys.stdin) if d['name']=='paginas-social'), ''))" || true)
+          if [ -z "$ID" ]; then
+            $W d1 create paginas-social
+            ID=$($W d1 list --json | python3 -c "import json,sys; print(next(d['uuid'] for d in json.load(sys.stdin) if d['name']=='paginas-social'))")
+          fi
+          sed -i "s/COLOCADO_PELO_GITHUB_ACTIONS/$ID/" wrangler.toml
+          $W d1 execute paginas-social --remote --file schema.sql --yes
+          $W deploy | tee deploy.log
+          URL=$(grep -o 'https://[a-zA-Z0-9.-]*workers\.dev' deploy.log | head -1)
+          if [ -z "$URL" ]; then echo "::error::Não achei o endereço do servidor social no resultado da publicação"; exit 1; fi
+          curl -sf "$URL/" | grep -q paginas-social || { echo "::warning::o servidor ainda não respondeu (pode levar alguns segundos na primeira vez)"; }
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Comunidade publicada em $URL"
+      - name: Aviso
+        if: env.CLOUDFLARE_API_TOKEN == '' || env.CLOUDFLARE_ACCOUNT_ID == ''
+        run: echo "::warning::Sem os segredos CLOUDFLARE_API_TOKEN e CLOUDFLARE_ACCOUNT_ID a aba Comunidade fica desativada (veja o LEIA-ME)."
   windows:
+    needs: social
     runs-on: windows-latest
+    env:
+      SOCIAL_URL: ${{ needs.social.outputs.url || secrets.SOCIAL_URL }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -88,6 +130,18 @@ jobs:
               Write-Host "IA: $($ia.text)"
             } catch { Write-Host "::warning::A IA não respondeu no teste: $($_.Exception.Message)" }
           } else { Write-Host "::warning::Sem o segredo IA_PROXY_URL: a IA não vai funcionar nesta versão." }
+          Invoke-RestMethod "$b/api/notif?t=$tk" -Method Post -ContentType 'application/json' -Body '{"on":true,"horas":["09:00","20:30"]}' | Out-Null
+          $tarefa = Get-ScheduledTask -TaskName 'Paginas - Reflexoes' -ErrorAction SilentlyContinue
+          if (-not $tarefa) { throw "a tarefa das reflexoes nao foi criada" }
+          Write-Host "reflexoes agendadas: $(($tarefa.Triggers | ForEach-Object { ([datetime]$_.StartBoundary).ToString('HH:mm') }) -join ', ')"
+          & powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Paginas\notificar.ps1"
+          $log = Get-Content "$env:LOCALAPPDATA\Paginas\erro.log" -ErrorAction SilentlyContinue | Select-String 'notificacao'
+          if ($log) { Write-Host "::warning::notificacao no teste: $log" } else { Write-Host "notificacao de reflexao mostrada sem erro" }
+          Invoke-RestMethod "$b/api/notif?t=$tk" -Method Post -ContentType 'application/json' -Body '{"on":false}' | Out-Null
+          if (Get-ScheduledTask -TaskName 'Paginas - Reflexoes' -ErrorAction SilentlyContinue) { throw "a tarefa das reflexoes nao foi removida" }
+          $h2 = (Invoke-WebRequest "$b/" -UseBasicParsing).Content
+          if ($env:SOCIAL_URL -and -not $h2.Contains($env:SOCIAL_URL)) { throw "o endereco da Comunidade nao entrou no programa" }
+          if (-not $env:SOCIAL_URL) { Write-Host "::warning::Sem SOCIAL_URL: a Comunidade fica desativada nesta versao." } else { Write-Host "Comunidade: $env:SOCIAL_URL" }
           if (-not $env:GOOGLE_CLIENT_ID) { Write-Host "::warning::Sem os segredos GOOGLE_CLIENT_ID/SECRET: o login com Google fica desativado." }
           try { Invoke-RestMethod "$b/api/bye?t=$tk" | Out-Null } catch {}
           Write-Host "TESTE DO WINDOWS OK"
@@ -106,7 +160,10 @@ jobs:
             build/Paginas.exe
             build/Paginas.bat
   android:
+    needs: social
     runs-on: ubuntu-24.04   # já vem com o Android SDK instalado
+    env:
+      SOCIAL_URL: ${{ needs.social.outputs.url || secrets.SOCIAL_URL }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4

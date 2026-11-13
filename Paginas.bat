@@ -14,8 +14,11 @@ $IA_PROXY_URL = ''
 $IA_PROXY_TOKEN = ''
 $G_CLIENT_ID = ''
 $G_CLIENT_SECRET = ''
+$SOCIAL_URL = ''
 if ($IA_PROXY_URL -and $IA_PROXY_URL -notmatch '^https?://') { $IA_PROXY_URL = 'https://' + $IA_PROXY_URL }
 $IA_PROXY_URL = $IA_PROXY_URL.TrimEnd('/')
+if ($SOCIAL_URL -and $SOCIAL_URL -notmatch '^https?://') { $SOCIAL_URL = 'https://' + $SOCIAL_URL }
+$SOCIAL_URL = $SOCIAL_URL.TrimEnd('/')
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $dir = Join-Path $env:LOCALAPPDATA 'Paginas'
@@ -171,7 +174,7 @@ $f=[IO.File]::ReadAllText($env:PAGINAS_SELF,[Text.Encoding]::UTF8).Replace([stri
   $hi = $all.IndexOf($mark)
   if ($hi -lt 0) { throw 'Arquivo do programa incompleto (HTML nao encontrado).' }
   $token = [guid]::NewGuid().ToString('N')
-  $html = $all.Substring($hi + $mark.Length).Replace('__TOKEN__', $token).Replace('__VERSAO__', $APP_VERSAO).Replace('__REPO__', $ATUALIZA_REPO).Replace('__PLAT__', 'windows')
+  $html = $all.Substring($hi + $mark.Length).Replace('__TOKEN__', $token).Replace('__VERSAO__', $APP_VERSAO).Replace('__REPO__', $ATUALIZA_REPO).Replace('__PLAT__', 'windows').Replace('__SOCIAL__', $SOCIAL_URL)
 
   # ---- servidor local (somente neste computador) ----
   $fixedPort = 0
@@ -259,6 +262,30 @@ $f=[IO.File]::ReadAllText($env:PAGINAS_SELF,[Text.Encoding]::UTF8).Replace([stri
     $rng.Dispose()
     return (B64Url $b)
   }
+
+  # ---- notificacao de reflexao (roda sozinha pela tarefa agendada do Windows) ----
+  $NOTIF_PS1 = @'
+$ErrorActionPreference = 'Stop'
+try {
+  $d = Split-Path -Parent $MyInvocation.MyCommand.Path
+  $f = [IO.File]::ReadAllText((Join-Path $d 'Paginas.bat'), [Text.Encoding]::UTF8)
+  $m = [regex]::Match($f, '<script type="application/json" id="refle[x]oes">([\s\S]*?)</script>')
+  $l = @($m.Groups[1].Value | ConvertFrom-Json)
+  $r = $l[(Get-Random -Maximum $l.Count)]
+  $t = [Security.SecurityElement]::Escape([string]$r.t)
+  $a = ''
+  if ($r.a) { $a = '<text placement="attribution">' + [Security.SecurityElement]::Escape('— ' + [string]$r.a) + '</text>' }
+  $ico = (Join-Path $d 'icone.png') -replace '\\', '/'
+  [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+  [void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+  $x = New-Object Windows.Data.Xml.Dom.XmlDocument
+  $x.LoadXml('<toast><visual><binding template="ToastGeneric"><image placement="appLogoOverride" hint-crop="circle" src="file:///' + $ico + '"/><text>Reflexão do Páginas 💭</text><text>' + $t + '</text>' + $a + '</binding></visual></toast>')
+  $app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+  [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show((New-Object Windows.UI.Notifications.ToastNotification $x))
+} catch {
+  [IO.File]::AppendAllText((Join-Path $env:LOCALAPPDATA 'Paginas\erro.log'), ((Get-Date).ToString('s') + ' notificacao: ' + $_.Exception.Message + "`r`n"))
+}
+'@
 
   # ---- conta Google (fluxo de "app para computador" com PKCE, igual ao Investe.AI) e copia dos dados no Google Drive ----
   $G_AUTH = 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -399,6 +426,35 @@ $f=[IO.File]::ReadAllText($env:PAGINAS_SELF,[Text.Encoding]::UTF8).Replace([stri
       Send-Json $ctx 200 '{"ok":true}'
     }
     elseif ($path -eq '/api/google/status') { Send-Json $ctx 200 (Google-Status) }
+    elseif ($path -eq '/api/google/token') {
+      # acesso do Google para entrar na Comunidade (o servidor social confirma a conta com o proprio Google)
+      Send-Json $ctx 200 (ConvertTo-Json -Compress -InputObject @{ token = (Get-GAccess) })
+    }
+    elseif ($path -eq '/api/notif' -and $req.HttpMethod -eq 'POST') {
+      $in = (Read-Body $req) | ConvertFrom-Json
+      $nomeTarefa = 'Paginas - Reflexoes'
+      $ps1 = Join-Path $dir 'notificar.ps1'
+      $vbsN = Join-Path $dir 'notificar.vbs'
+      [IO.File]::WriteAllText($ps1, $NOTIF_PS1, (New-Object System.Text.UTF8Encoding($true)))
+      $vbsTxt = 'CreateObject("WScript.Shell").Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""' + $ps1 + '""", 0, False' + "`r`n"
+      [IO.File]::WriteAllText($vbsN, $vbsTxt, [Text.Encoding]::Unicode)
+      try { Unregister-ScheduledTask -TaskName $nomeTarefa -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+      if ($in.on) {
+        $gat = @()
+        foreach ($h in @($in.horas)) { if ([string]$h -match '^\d{1,2}:\d{2}$') { $gat += New-ScheduledTaskTrigger -Daily -At ([datetime]::ParseExact([string]$h, 'H:mm', $null)) } }
+        if (-not $gat.Count) { $gat += New-ScheduledTaskTrigger -Daily -At ([datetime]::ParseExact('09:00', 'H:mm', $null)) }
+        $acao = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\wscript.exe') -Argument ('"' + $vbsN + '"')
+        $cfgT = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+        [void](Register-ScheduledTask -TaskName $nomeTarefa -Action $acao -Trigger $gat -Settings $cfgT -Description 'Reflexoes do Paginas' -Force)
+      }
+      Send-Json $ctx 200 '{"ok":true}'
+    }
+    elseif ($path -eq '/api/notif/teste' -and $req.HttpMethod -eq 'POST') {
+      $ps1 = Join-Path $dir 'notificar.ps1'
+      [IO.File]::WriteAllText($ps1, $NOTIF_PS1, (New-Object System.Text.UTF8Encoding($true)))
+      [void](Start-Process powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ('"' + $ps1 + '"') -WindowStyle Hidden)
+      Send-Json $ctx 200 '{"ok":true}'
+    }
     elseif ($path -eq '/api/google/start') {
       if (-not ($G_CLIENT_ID -and $G_CLIENT_SECRET)) { Send-Json $ctx 400 '{"error":"O login com Google não está ativado nesta cópia do programa."}'; return }
       foreach ($k in @($OA.Keys)) { if (((Get-Date) - $OA[$k].t).TotalMinutes -gt 15) { $OA.Remove($k) } }
@@ -636,16 +692,18 @@ $f=[IO.File]::ReadAllText($env:PAGINAS_SELF,[Text.Encoding]::UTF8).Replace([stri
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Páginas</title>
 <link rel="icon" type="image/png" href="/api/icon?t=__TOKEN__">
+<script>(function(){try{var t=localStorage.getItem('pg_tema')||'auto',d=t==='escuro'||(t==='auto'&&matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.classList.add(d?'escuro':'claro')}catch(e){}})()</script>
 <style>
 :root{
   color-scheme: light dark;
   --bg:#f6f1e7; --card:#fffdf8; --ink:#2a2420; --muted:#7a6f63; --line:#e6dccb;
   --accent:#b4532a; --accent-ink:#fff; --ok:#3f7d4e; --track:#eadfca; --warn:#c08a1e;
 }
-@media (prefers-color-scheme: dark){
-  :root{ --bg:#1b1815; --card:#25211d; --ink:#f0e8db; --muted:#a39886; --line:#383128;
+/* tema escuro: automático (segue o aparelho) ou escolhido em Ajustes > Aparência */
+:root.escuro{ color-scheme: dark;
+  --bg:#1b1815; --card:#25211d; --ink:#f0e8db; --muted:#a39886; --line:#383128;
     --accent:#e08a5c; --accent-ink:#1b1815; --ok:#7bc08a; --track:#383128; --warn:#e0b04a; }
-}
+:root.claro{ color-scheme: light }
 *{box-sizing:border-box}
 html,body{margin:0}
 body{background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;min-height:100vh}
@@ -780,7 +838,7 @@ dialog form{display:flex;flex-direction:column;gap:.8rem}
 <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;0,700;1,400&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
 <style>
 html{background:#f6f1e7}
-@media(prefers-color-scheme:dark){html{background:#1b1815}}
+html.escuro{background:#1b1815}
 #splash{position:fixed;inset:0;z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.9rem;background:#f6f1e7;color:#7a6f63;transition:opacity .5s ease,visibility .5s}
 #splash.out{opacity:0;visibility:hidden}
 #splash svg{width:104px;height:104px;filter:drop-shadow(0 14px 18px rgba(120,60,25,.35));animation:spfloat 2.4s ease-in-out infinite}
@@ -790,7 +848,7 @@ html{background:#f6f1e7}
 #splash i::after{content:'';display:block;width:40%;height:100%;border-radius:9px;background:linear-gradient(90deg,#b4532a,#e08a5c);animation:spbar 1.2s ease-in-out infinite}
 @keyframes spbar{0%{transform:translateX(-110%)}100%{transform:translateX(260%)}}
 @keyframes spfloat{50%{transform:translateY(-6px)}}
-@media(prefers-color-scheme:dark){#splash{background:#1b1815;color:#a39886}#splash b{color:#e08a5c}#splash i{background:#383128}}
+.escuro #splash{background:#1b1815;color:#a39886}.escuro #splash b{color:#e08a5c}.escuro #splash i{background:#383128}
 </style>
 </head>
 <body>
@@ -801,6 +859,7 @@ html{background:#f6f1e7}
     <nav>
       <button class="tab" data-v="today" data-a="nav">Hoje</button>
       <button class="tab" data-v="foryou" data-a="nav">Para você</button>
+      <button class="tab" data-v="social" data-a="nav">Comunidade</button>
       <button class="tab" data-v="library" data-a="nav">Pesquisar</button>
       <button class="tab" data-v="brasil" data-a="nav">Brasil</button>
       <button class="tab" data-v="shelf" data-a="nav">Estante</button>
@@ -1423,7 +1482,7 @@ const shelfBook = gid => state.books.find(b => b.gid === gid);
 
 function tile(g) {
   const sb = shelfBook(g.gid);
-  const cover = `<div class="cover"><span>${esc(g.title)}</span>${g.cover ? `<img src="${esc(g.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</div>`;
+  const cover = `<div class="cover"><span>${esc(g.title)}</span>${g.cover ? `<img src="${esc(g.cover)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</div>`;
   let act;
   if (!sb) act = `<button class="btn sm primary" data-x="readg" data-id="${g.gid}">Ler</button><button class="btn sm" data-x="addg" data-id="${g.gid}">+ Estante</button>`;
   else if (sb.status === 'finished') act = `<button class="btn sm" data-x="readg" data-id="${g.gid}">Reler</button>`;
@@ -1933,7 +1992,7 @@ function acts(p) {
   ensure();
   return `<div class="pact"><button class="pbtn ${state.likes[p.id] ? 'on' : ''}" data-x="plike" data-id="${p.id}">${state.likes[p.id] ? '♥ Curtido' : '♡ Curtir'}</button><button class="pbtn ${state.saved[p.id] ? 'on' : ''}" data-x="psave" data-id="${p.id}">${state.saved[p.id] ? '🔖 Salvo' : '🔖 Salvar'}</button>${p.kind === 'quote' ? `<button class="pbtn" data-x="pcopy" data-id="${p.id}">Copiar</button>` : ''}</div>`;
 }
-let coverHtml = g => `<div class="cover"><span>${esc(g.title)}</span>${g.cover ? `<img src="${esc(g.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</div>`;
+let coverHtml = g => `<div class="cover"><span>${esc(g.title)}</span>${g.cover ? `<img src="${esc(g.cover)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</div>`;
 function tileAct(g) {
   const sb = shelfBook(g.gid);
   if (!sb) return `<button class="btn sm primary" data-x="readg" data-id="${g.gid}">Ler</button><button class="btn sm" data-x="addg" data-id="${g.gid}">+ Estante</button>`;
@@ -2152,10 +2211,10 @@ render();
 </script>
 <style>
 :root{--sh:0 1px 2px rgba(60,35,15,.06),0 8px 24px -12px rgba(60,35,15,.25);--sh2:0 2px 4px rgba(60,35,15,.08),0 20px 38px -16px rgba(60,35,15,.4);--ease:cubic-bezier(.2,.7,.2,1)}
-@media(prefers-color-scheme:dark){:root{--sh:0 1px 2px rgba(0,0,0,.4),0 8px 24px -12px rgba(0,0,0,.7);--sh2:0 2px 4px rgba(0,0,0,.5),0 20px 38px -16px rgba(0,0,0,.9)}}
+:root.escuro{--sh:0 1px 2px rgba(0,0,0,.4),0 8px 24px -12px rgba(0,0,0,.7);--sh2:0 2px 4px rgba(0,0,0,.5),0 20px 38px -16px rgba(0,0,0,.9)}
 *{scrollbar-width:thin;scrollbar-color:var(--line) transparent}
-body{background:radial-gradient(900px 420px at 8% -8%,color-mix(in srgb,var(--accent) 14%,transparent),transparent 70%),radial-gradient(700px 380px at 100% 0,color-mix(in srgb,var(--warn) 10%,transparent),transparent 70%),var(--bg);background-attachment:fixed}
-header{background:color-mix(in srgb,var(--card) 78%,transparent);-webkit-backdrop-filter:saturate(1.4) blur(14px);backdrop-filter:saturate(1.4) blur(14px)}
+body{background:radial-gradient(900px 420px at 8% -8%,color-mix(in srgb,var(--accent) 14%,transparent),transparent 70%),radial-gradient(700px 380px at 100% 0,color-mix(in srgb,var(--warn) 10%,transparent),transparent 70%),var(--bg)}
+header{background:var(--card);box-shadow:0 1px 0 var(--line)}
 .brand{background:linear-gradient(90deg,var(--accent),var(--warn));-webkit-background-clip:text;background-clip:text;color:transparent;font-size:1.65rem}
 .tab{transition:color .2s,background .25s,transform .2s,box-shadow .25s}
 .tab:hover{transform:translateY(-1px)}
@@ -2806,6 +2865,852 @@ if (IS_APP) setTimeout(async () => {
   setTimeout(checkUpdate, 3000);
 }, 500);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && GS.connected) Sync.push(); });
+/* ======================================================================
+   PARTE 7: tema, jogo (XP, níveis, missões, conquistas), tutorial,
+   reflexões e comunidade (amigos, posts, rankings, comunidades)
+   ====================================================================== */
+
+/* ---------- tema claro / escuro / automático ---------- */
+const temaEscolhido = () => (state.settings && state.settings.tema) || 'auto';
+function aplicaTema() {
+  const t = temaEscolhido();
+  const escuro = t === 'escuro' || (t === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+  const h = document.documentElement;
+  h.classList.toggle('escuro', escuro); h.classList.toggle('claro', !escuro);
+  try { localStorage.setItem('pg_tema', t); } catch (e) {}
+  const m = document.querySelector('meta[name=theme-color]');
+  if (m) m.content = escuro ? '#1b1815' : '#f6f1e7';
+}
+try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', aplicaTema); } catch (e) {}
+
+/* ---------- utilidades ---------- */
+const G = () => {
+  if (!state.game) state.game = {};
+  const g = state.game;
+  g.conq = g.conq || {}; g.cont = g.cont || {}; g.miss = g.miss || {};
+  if (!g.dia || g.dia.d !== todayStr()) g.dia = { d: todayStr(), ia: 0, quiz: 0, posts: 0, curtidas: 0 };
+  return g;
+};
+function gameConta(k, n) {
+  const g = G(); n = n || 1;
+  g.cont[k] = (g.cont[k] || 0) + n;
+  if (k in g.dia) g.dia[k] += n;
+  Store.save(state);
+}
+const nf = n => Number(n || 0).toLocaleString('pt-BR');
+function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+
+/* ---------- números do jogador (tudo calculado a partir dos registros) ---------- */
+let _st = null, _stKey = '';
+function jogoStats() {
+  const g = G();
+  const key = state.logs.length + '|' + state.books.length + '|' + JSON.stringify(g.cont) + '|' + Object.keys(g.conq).length + '|' + Object.keys(g.miss).length + '|' + todayStr();
+  if (_st && key === _stKey) return _st;
+  let min = 0, pg = 0, noite = false, manha = false;
+  const logs = state.logs.slice().sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  const dias = new Set(); let maxSess = 0, sess = 0, prev = null;
+  for (const l of logs) {
+    min += l.minutes || 0; pg += l.pages || 0; dias.add(l.date);
+    const h = new Date(l.ts || 0).getHours();
+    if ((l.minutes || l.pages) && (h >= 22 || h < 4)) noite = true;
+    if ((l.minutes || l.pages) && h >= 4 && h < 7) manha = true;
+    if (prev && prev.bookId === l.bookId && (l.ts - prev.ts) <= ((l.minutes || 0) * 60000 + 180000)) sess += l.minutes || 0; else sess = l.minutes || 0;
+    maxSess = Math.max(maxSess, sess); prev = l;
+  }
+  let fds = false;
+  for (const d of dias) { const dt = new Date(d + 'T12:00:00'); if (dt.getDay() === 6 && dias.has(addDays(d, 1))) { fds = true; break; } }
+  const fin = state.books.filter(b => b.status === 'finished').length;
+  const hl = state.books.reduce((n, b) => n + ((b.hl || []).length), 0);
+  const autores = new Set(state.books.filter(b => b.status === 'finished' || logs.some(l => l.bookId === b.id)).map(b => (b.author || '').toLowerCase()).filter(Boolean)).size;
+  let metas = 0; for (const d of dias) if (goalMet(d)) metas++;
+  const miss = Object.values(g.miss).reduce((n, l) => n + l.length, 0);
+  const s = { min, pg, fin, hl, autores, metas, miss, noite, manha, fds, maxSess, best: Math.max(bestStreak(), computeStreak()), streak: computeStreak(),
+    ia: g.cont.ia || 0, quizOk: g.cont.quizOk || 0, posts: g.cont.posts || 0, seguindo: g.cont.seguindo || 0, comunidades: g.cont.comunidades || 0,
+    top10: !!g.cont.top10, tut: !!g.cont.tutorial };
+  // XP: leitura vale mais; conquistas e missões dão bônus
+  let xp = min * 2 + pg + fin * 150 + hl * 5 + s.ia * 3 + s.quizOk * 10 + s.posts * 15 + miss * 40;
+  for (const id in g.conq) { const c = CQ_BY[id]; if (c) xp += c[5]; }
+  for (const d in g.miss) if (g.miss[d].length >= 3) xp += 60;
+  s.xp = xp;
+  Object.assign(s, nivelDe(xp));
+  _st = s; _stKey = key;
+  return s;
+}
+const xpPara = L => 100 + 40 * (L - 1);
+function nivelDe(xp) {
+  let L = 1, r = xp;
+  while (r >= xpPara(L) && L < 999) { r -= xpPara(L); L++; }
+  return { nivel: L, dentro: r, prox: xpPara(L) };
+}
+const TITULOS = [[1, 'Leitor curioso'], [3, 'Aprendiz de biblioteca'], [5, 'Devorador de páginas'], [8, 'Explorador de mundos'], [12, 'Guardião das estantes'], [16, 'Sábio das letras'], [20, 'Lenda da biblioteca'], [30, 'Imortal da Academia']];
+const tituloDe = L => TITULOS.filter(t => L >= t[0]).pop()[1];
+
+/* ---------- conquistas: [id, emoji, nome, descrição, progresso(s) -> [atual, meta], XP] ---------- */
+const CQ = [
+  ['streak3', '🔥', 'Chama acesa', '3 dias seguidos de leitura', s => [s.best, 3], 50],
+  ['streak7', '🔥', 'Semana inteira', '7 dias seguidos de leitura', s => [s.best, 7], 100],
+  ['streak14', '🌶️', 'Duas semanas', '14 dias seguidos de leitura', s => [s.best, 14], 180],
+  ['streak30', '🌋', 'Hábito de ferro', '30 dias seguidos de leitura', s => [s.best, 30], 300],
+  ['streak100', '☄️', 'Lenda da constância', '100 dias seguidos de leitura', s => [s.best, 100], 800],
+  ['streak365', '🌞', 'Um ano lendo', '365 dias seguidos de leitura', s => [s.best, 365], 2000],
+  ['min60', '⏱️', 'Primeira hora', '1 hora de leitura no total', s => [s.min, 60], 40],
+  ['min600', '⌛', 'Dez horas de mundos', '10 horas de leitura', s => [s.min, 600], 150],
+  ['min3000', '🕰️', 'Cinquenta horas', '50 horas de leitura', s => [s.min, 3000], 400],
+  ['min6000', '🏛️', 'Cem horas de biblioteca', '100 horas de leitura', s => [s.min, 6000], 800],
+  ['pg100', '📄', 'Cem páginas', '100 páginas lidas', s => [s.pg, 100], 40],
+  ['pg1000', '📚', 'Mil páginas', '1.000 páginas lidas', s => [s.pg, 1000], 200],
+  ['pg5000', '🗻', 'Montanha de papel', '5.000 páginas lidas', s => [s.pg, 5000], 600],
+  ['liv1', '🏁', 'Primeiro da estante', 'Termine um livro', s => [s.fin, 1], 100],
+  ['liv5', '🎖️', 'Cinco histórias', 'Termine 5 livros', s => [s.fin, 5], 250],
+  ['liv10', '🏆', 'Dez livros', 'Termine 10 livros', s => [s.fin, 10], 500],
+  ['liv25', '👑', 'Devorador de livros', 'Termine 25 livros', s => [s.fin, 25], 1000],
+  ['hl1', '🖍️', 'Marca-texto', 'Grife o primeiro trecho', s => [s.hl, 1], 20],
+  ['hl50', '🖌️', 'Colecionador de frases', 'Grife 50 trechos', s => [s.hl, 50], 200],
+  ['ia1', '✨', 'Curiosidade', 'Peça à IA o significado de um trecho', s => [s.ia, 1], 20],
+  ['ia30', '🔎', 'Detetive das palavras', 'Use a IA 30 vezes', s => [s.ia, 30], 150],
+  ['quiz1', '🧠', 'Primeira resposta', 'Acerte um quiz na aba Para você', s => [s.quizOk, 1], 20],
+  ['quiz25', '🎓', 'Sabe-tudo', 'Acerte 25 quizzes', s => [s.quizOk, 25], 250],
+  ['noite', '🦉', 'Coruja', 'Leia depois das 22h', s => [s.noite ? 1 : 0, 1], 30],
+  ['manha', '🐦', 'Madrugador', 'Leia antes das 7h da manhã', s => [s.manha ? 1 : 0, 1], 30],
+  ['marat', '🏃', 'Maratona', 'Leia 60 minutos seguidos', s => [s.maxSess, 60], 80],
+  ['fds', '🛋️', 'Fim de semana literário', 'Leia no sábado e no domingo', s => [s.fds ? 1 : 0, 1], 40],
+  ['meta10', '🎯', 'Na mosca', 'Cumpra a meta diária em 10 dias', s => [s.metas, 10], 120],
+  ['meta50', '🏹', 'Arqueiro da leitura', 'Cumpra a meta diária em 50 dias', s => [s.metas, 50], 400],
+  ['autores5', '🗺️', 'Explorador', 'Leia livros de 5 autores diferentes', s => [s.autores, 5], 120],
+  ['missoes10', '📜', 'Missão cumprida', 'Complete 10 missões diárias', s => [s.miss, 10], 120],
+  ['missoes100', '🗡️', 'Aventureiro', 'Complete 100 missões diárias', s => [s.miss, 100], 500],
+  ['nivel5', '⭐', 'Nível 5', 'Chegue ao nível 5', s => [s.nivel, 5], 0],
+  ['nivel10', '🌟', 'Nível 10', 'Chegue ao nível 10', s => [s.nivel, 10], 0],
+  ['nivel20', '💫', 'Nível 20', 'Chegue ao nível 20', s => [s.nivel, 20], 0],
+  ['post1', '💬', 'Primeira palavra', 'Publique algo na Comunidade', s => [s.posts, 1], 30],
+  ['post10', '📣', 'Voz ativa', 'Publique 10 vezes', s => [s.posts, 10], 120],
+  ['seg1', '🤝', 'Primeira amizade', 'Siga um leitor', s => [s.seguindo, 1], 30],
+  ['seg10', '👥', 'Clube do livro', 'Siga 10 leitores', s => [s.seguindo, 10], 100],
+  ['comun1', '🏘️', 'Em comunidade', 'Entre numa comunidade de leitura', s => [s.comunidades, 1], 30],
+  ['top10', '🥇', 'Destaque da cidade', 'Fique entre os 10 da sua cidade na semana', s => [s.top10 ? 1 : 0, 1], 200],
+  ['tutorial', '🧭', 'Guia completo', 'Termine o tutorial do Páginas', s => [s.tut ? 1 : 0, 1], 20],
+];
+const CQ_BY = Object.fromEntries(CQ.map(c => [c[0], c]));
+
+/* ---------- missões diárias ---------- */
+function hojeLido() {
+  const t = todayStr(); let m = 0, p = 0;
+  for (const l of state.logs) if (l.date === t) { m += l.minutes || 0; p += l.pages || 0; }
+  if (typeof R !== 'undefined' && R) { m += Math.floor(R.secs / 60); p += R.pagesAcc || 0; }
+  return { m, p };
+}
+function grifosHoje() {
+  const ini = new Date(todayStr() + 'T00:00:00').getTime();
+  return state.books.reduce((n, b) => n + (b.hl || []).filter(h => (h.ts || 0) >= ini).length, 0);
+}
+const MP = {
+  ler15: { e: '📖', t: 'Leia 15 minutos', alvo: 15, prog: () => hojeLido().m },
+  ler30: { e: '📖', t: 'Leia 30 minutos', alvo: 30, prog: () => hojeLido().m },
+  pag10: { e: '📄', t: 'Leia 10 páginas', alvo: 10, prog: () => hojeLido().p },
+  pag25: { e: '📄', t: 'Leia 25 páginas', alvo: 25, prog: () => hojeLido().p },
+  meta: { e: '🎯', t: 'Cumpra sua meta do dia', alvo: 1, prog: () => goalMet(todayStr()) ? 1 : 0 },
+  grifo: { e: '🖍️', t: 'Grife 2 trechos', alvo: 2, prog: grifosHoje },
+  ia: { e: '✨', t: 'Peça à IA o significado de uma palavra', alvo: 1, prog: () => G().dia.ia },
+  quiz: { e: '🧠', t: 'Responda um quiz em Para você', alvo: 1, prog: () => G().dia.quiz },
+  post: { e: '💬', t: 'Compartilhe algo na Comunidade', alvo: 1, prog: () => G().dia.posts, social: true },
+  curtir: { e: '❤️', t: 'Curta 3 posts de outros leitores', alvo: 3, prog: () => G().dia.curtidas, social: true },
+};
+function missoesHoje() {
+  const t = todayStr(), h = hashStr(t + (state.profile && state.profile.name || ''));
+  const leitura = ['ler15', 'ler30', 'pag10', 'pag25', 'meta'];
+  const outras = ['grifo', 'ia', 'quiz'].concat(SOC.token ? ['post', 'curtir'] : []);
+  const a = leitura[h % leitura.length];
+  const b = outras[(h >>> 4) % outras.length];
+  const rest = outras.filter(x => x !== b);
+  const c = rest[(h >>> 9) % rest.length];
+  return [a, b, c].map(id => {
+    const m = MP[id], v = Math.min(m.alvo, m.prog() || 0);
+    return { id, ...m, v, ok: v >= m.alvo };
+  });
+}
+
+/* ---------- verificação: conquistas e missões novas ---------- */
+let _jogoT = null, _jogoAndando = false;
+function agendaJogo() { clearTimeout(_jogoT); _jogoT = setTimeout(verificaJogo, 700); }
+function verificaJogo() {
+  if (_jogoAndando || loadFailed || !window.__booted) return;
+  _jogoAndando = true;
+  try {
+    const g = G(), t = todayStr(), novas = [];
+    // missões
+    const feitas = g.miss[t] || [];
+    for (const m of missoesHoje()) if (m.ok && !feitas.includes(m.id)) { feitas.push(m.id); novas.push({ tipo: 'missao', e: m.e, nome: 'Missão cumprida!', desc: m.t, xp: 40 }); }
+    if (feitas.length) g.miss[t] = feitas;
+    if (feitas.length >= 3 && !g.bau) g.bau = {};
+    if (feitas.length >= 3 && g.bau && !g.bau[t]) { g.bau[t] = 1; novas.push({ tipo: 'bau', e: '🎁', nome: 'Baú do dia!', desc: 'Você completou as 3 missões de hoje.', xp: 60 }); }
+    _st = null;
+    // conquistas (mais de uma rodada: uma conquista pode subir o nível e liberar outra)
+    const primeira = !g.iniciado;
+    for (let volta = 0; volta < 3; volta++) {
+      const s = jogoStats(); let achou = false;
+      for (const c of CQ) {
+        if (g.conq[c[0]]) continue;
+        const [v, meta] = c[4](s);
+        if (v >= meta) { g.conq[c[0]] = Date.now(); achou = true; if (!primeira) novas.push({ tipo: 'conq', e: c[1], nome: c[2], desc: c[3], xp: c[5] }); _st = null; }
+      }
+      if (!achou) break;
+    }
+    const nv = jogoStats().nivel;
+    if (g.nivel && nv > g.nivel && !primeira && !novas.some(x => x.nome === 'Nível ' + nv)) novas.push({ tipo: 'nivel', e: '⬆️', nome: 'Nível ' + nv + '!', desc: tituloDe(nv), xp: 0 });
+    const mudou = novas.length || primeira || g.nivel !== nv;
+    g.nivel = nv;
+    if (primeira) { g.iniciado = Date.now(); const n = Object.keys(g.conq).length; if (n) setTimeout(() => toast(`Você já tem ${n} ${n === 1 ? 'conquista' : 'conquistas'} e está no nível ${nv}! Veja em Estatísticas.`), 2500); }
+    if (mudou) { Sync.quiet = !novas.length; try { Store.save(state); } finally { Sync.quiet = false; } }
+    if (novas.length) { CEL.fila.push(...novas); celebra(); socPerfilDepois(); if (view === 'today' && !R) render(); }
+  } finally { _jogoAndando = false; }
+}
+
+/* ---------- comemoração ---------- */
+const CEL = { fila: [], aberta: false };
+function celebra() {
+  if (CEL.aberta || !CEL.fila.length) return;
+  const c = CEL.fila.shift(); CEL.aberta = true;
+  const el = document.createElement('div');
+  el.id = 'cel'; el.className = 'cel';
+  const cores = ['#e08a5c', '#e0b04a', '#7bc08a', '#6aa6e0', '#c47bd6'];
+  const conf = Array.from({ length: 28 }, (_, i) => `<i style="left:${(i * 37) % 100}%;background:${cores[i % 5]};animation-delay:${(i % 7) * 0.08}s;--r:${(i * 53) % 360}deg"></i>`).join('');
+  const rot = { conq: 'Conquista desbloqueada', missao: 'Missão diária', bau: 'Recompensa', nivel: 'Você subiu de nível' }[c.tipo];
+  el.innerHTML = `<div class="celconf">${conf}</div><div class="celbox"><small>${rot}</small><div class="cele">${c.e}</div><h2>${esc(c.nome)}</h2><p>${esc(c.desc)}</p>${c.xp ? `<b class="celxp">+${c.xp} XP</b>` : ''}
+    <div class="bookact" style="justify-content:center">${c.tipo === 'conq' && SOC.token ? '<button class="btn" data-g="celshare">Compartilhar</button>' : ''}<button class="btn primary" data-g="celok">Continuar</button></div></div>`;
+  el.dataset.nome = c.nome; el.dataset.e = c.e;
+  document.body.appendChild(el);
+  try { if (navigator.vibrate) navigator.vibrate(60); } catch (e) {}
+}
+function fechaCel() { const el = $('#cel'); if (el) el.remove(); CEL.aberta = false; setTimeout(celebra, 250); }
+
+/* ---------- cartão do jogo na aba Hoje ---------- */
+function cartaoJogo() {
+  const s = jogoStats(), ms = missoesHoje(), g = G(), feitas = (g.miss[todayStr()] || []).length;
+  const pct = Math.round(s.dentro / s.prox * 100);
+  const nconq = Object.keys(g.conq).length;
+  return `<section class="card jogo" id="jogo">
+    <div class="jtop"><div class="jlvl"><span>${s.nivel}</span></div><div style="flex:1;min-width:0"><b>${esc(tituloDe(s.nivel))}</b>
+      <div class="xpbar"><i style="width:${pct}%"></i></div><small class="muted">${nf(s.dentro)} / ${nf(s.prox)} XP para o nível ${s.nivel + 1} · ${nf(s.xp)} XP no total</small></div>
+      <button class="jstreak" data-g="irconq" title="Sequência de dias">🔥<b>${s.streak}</b></button></div>
+    <div class="jmiss"><div class="jmh"><b>Missões de hoje</b><span class="muted small">${feitas}/3 ${feitas >= 3 ? '· 🎁 baú aberto!' : '· complete as 3 e ganhe um baú'}</span></div>
+      ${ms.map(m => `<div class="jm ${m.ok ? 'ok' : ''}"><span class="jme">${m.ok ? '✅' : m.e}</span><div style="flex:1"><div>${esc(m.t)}</div><div class="mbar"><i style="width:${Math.round(m.v / m.alvo * 100)}%"></i></div></div><small>${m.v}/${m.alvo}</small><small class="jxp">+40</small></div>`).join('')}
+    </div>
+    <div class="jfoot"><button class="btn sm" data-g="irconq">🏅 Conquistas (${nconq}/${CQ.length})</button>${SOC.url ? '<button class="btn sm" data-g="irrank">🏆 Rankings</button>' : ''}</div>
+  </section>${cartaoReflexao()}`;
+}
+function gradeConquistas() {
+  const s = jogoStats(), g = G();
+  const l = CQ.map(c => {
+    const [v, meta] = c[4](s), ok = !!g.conq[c[0]];
+    return `<div class="cq ${ok ? 'ok' : ''}" title="${esc(c[3])}"><div class="cqe">${ok ? c[1] : '🔒'}</div><b>${esc(c[2])}</b><small>${esc(c[3])}</small>
+      ${ok ? `<small class="cqd">${new Date(g.conq[c[0]]).toLocaleDateString('pt-BR')}</small>` : `<div class="mbar"><i style="width:${Math.min(100, Math.round(v / meta * 100))}%"></i></div><small>${nf(Math.min(v, meta))}/${nf(meta)}</small>`}</div>`;
+  }).join('');
+  return `<section class="card" id="conq"><h2>🏅 Conquistas <span class="muted small">${Object.keys(g.conq).length} de ${CQ.length}</span></h2><div class="cqgrid">${l}</div></section>`;
+}
+
+/* ---------- reflexões (notificações e cartão do dia) ---------- */
+let _refl = null;
+function reflexoes() {
+  if (_refl) return _refl;
+  try { _refl = JSON.parse(document.getElementById('reflexoes').textContent); } catch (e) { _refl = []; }
+  return _refl;
+}
+function reflexaoDoDia() { const l = reflexoes(); return l.length ? l[hashStr('r' + todayStr()) % l.length] : null; }
+function cartaoReflexao() {
+  const r = reflexaoDoDia(); if (!r) return '';
+  return `<section class="card refl"><small class="muted">💭 Reflexão do dia</small><p>${esc(r.t)}</p>${r.a ? `<small class="muted">— ${esc(r.a)}</small>` : ''}
+    ${SOC.token ? '<div style="margin-top:.5rem"><button class="btn sm" data-g="reflshare">💬 Comentar com a comunidade</button></div>' : ''}</section>`;
+}
+const notifCfg = () => Object.assign({ on: false, horas: ['09:00', '20:00'] }, state.settings.reflex || {});
+async function aplicaNotif(avisar) {
+  const c = notifCfg();
+  try {
+    if (APP.plat === 'android' && window.PaginasAndroid && PaginasAndroid.agendarReflexoes) {
+      PaginasAndroid.agendarReflexoes(JSON.stringify(c));
+    } else if (IS_APP) {
+      const r = await api('/api/notif', { method: 'POST', body: JSON.stringify(c) });
+      await r.json();
+    }
+    if (avisar) toast(c.on ? `Pronto: reflexões às ${c.horas.join(' e ')}.` : 'Reflexões desligadas.');
+  } catch (e) { toast('Não consegui agendar as reflexões: ' + e.message); }
+}
+
+/* ---------- tutorial ---------- */
+const TUT_PASSOS = [
+  { t: 'Bem-vindo(a) ao Páginas! 📖', x: 'Em 1 minuto eu te mostro onde fica cada coisa. Você pode pular quando quiser e rever em Ajustes.' },
+  { sel: '.tab[data-v=today]', v: 'today', t: 'Hoje', x: 'Sua meta do dia, a sequência de dias seguidos 🔥 e o cronômetro. Leia um pouco todo dia para não perder a sequência.' },
+  { sel: '#jogo', v: 'today', t: 'Nível, XP e missões', x: 'Cada minuto lido dá XP e sobe o seu nível. Todo dia aparecem 3 missões novas: complete as três e ganhe um baú de bônus.' },
+  { sel: '.tab[data-v=foryou]', v: 'foryou', t: 'Para você', x: 'Um feed com sugestões de livros, frases, curiosidades e quizzes, misturado com os posts dos seus amigos.' },
+  { sel: '.tab[data-v=social]', v: 'social', t: 'Comunidade', x: 'Siga outros leitores, publique resenhas e frases, entre em comunidades de leitura e dispute os rankings da sua cidade, do estado, do país e do mundo.' },
+  { sel: '.tab[data-v=library]', v: 'library', t: 'Pesquisar', x: 'Milhares de livros gratuitos para ler aqui dentro. Busque por título, autor ou tema.' },
+  { sel: '.tab[data-v=shelf]', v: 'shelf', t: 'Estante', x: 'Seus livros. No leitor, selecione um trecho para grifar 🖍, pedir o significado à IA ✨ ou compartilhar 💬.' },
+  { sel: '.tab[data-v=stats]', v: 'stats', t: 'Estatísticas e conquistas', x: 'Seus números de leitura e as conquistas para desbloquear. Tem conquista para coruja, madrugador, maratona e muito mais.' },
+  { sel: '.tab[data-v=settings]', v: 'settings', t: 'Ajustes', x: 'Tema claro ou escuro, sua conta Google (para sincronizar e usar a Comunidade) e as reflexões diárias.' },
+  { t: 'Tudo pronto! 🎉', x: 'Comece pela aba Pesquisar ou pela Estante e leia alguns minutos hoje. Boa leitura!' },
+];
+const TUT = { i: -1 };
+function tutorialInicia() { TUT.i = 0; tutorialMostra(); }
+function tutorialFim(concluiu) {
+  TUT.i = -1; const el = $('#tut'); if (el) el.remove();
+  const g = G(); g.tutVisto = 1;
+  if (concluiu && !g.cont.tutorial) gameConta('tutorial'); else Store.save(state);
+  view = 'today'; render(); window.scrollTo(0, 0);
+}
+function tutorialMostra() {
+  const p = TUT_PASSOS[TUT.i]; if (!p) return tutorialFim(true);
+  if (p.v && view !== p.v) { view = p.v; render(); }
+  let el = $('#tut');
+  if (!el) { el = document.createElement('div'); el.id = 'tut'; document.body.appendChild(el); }
+  const alvo = p.sel ? document.querySelector(p.sel) : null;
+  if (alvo) alvo.scrollIntoView({ block: 'nearest', inline: 'center' });
+  const n = TUT_PASSOS.length;
+  const caixa = `<div class="tutbox"><small class="muted">${TUT.i + 1} de ${n}</small><h3>${esc(p.t)}</h3><p>${esc(p.x)}</p>
+    <div class="bookact">${TUT.i < n - 1 ? '<button class="btn" data-g="tutpular">Pular</button>' : ''}${TUT.i > 0 ? '<button class="btn" data-g="tutvolta">Voltar</button>' : ''}<button class="btn primary" data-g="tutprox">${TUT.i === n - 1 ? 'Começar' : 'Próximo'}</button></div></div>`;
+  requestAnimationFrame(() => {
+    if (alvo) {
+      const r = alvo.getBoundingClientRect(), pad = 6;
+      const lt = Math.max(4, r.left - pad), tp = Math.max(4, r.top - pad);
+      const w = Math.min(innerWidth - 8, r.width + pad * 2), h = Math.min(innerHeight * 0.6, r.height + pad * 2);
+      const embaixo = tp + h + 220 < innerHeight;
+      el.innerHTML = `<div class="tutspot" style="left:${lt}px;top:${tp}px;width:${w}px;height:${h}px"></div>${caixa}`;
+      const bx = el.querySelector('.tutbox');
+      bx.style.top = (embaixo ? tp + h + 12 : Math.max(8, tp - bx.offsetHeight - 12)) + 'px';
+      bx.style.left = Math.max(8, Math.min(innerWidth - bx.offsetWidth - 8, lt + w / 2 - bx.offsetWidth / 2)) + 'px';
+    } else {
+      el.innerHTML = `<div class="tutspot meio"></div>${caixa}`;
+      const bx = el.querySelector('.tutbox'); bx.classList.add('meio');
+    }
+  });
+}
+addEventListener('resize', () => { if (TUT.i >= 0) tutorialMostra(); });
+
+/* ======================================================================
+   COMUNIDADE (servidor social do Páginas)
+   ====================================================================== */
+const SOC = { url: '__SOCIAL__', token: '', eu: null, aba: 'feed', feed: null, feedErr: '', desc: false, rank: null, rq: { tipo: 'tempo', periodo: 'semana', escopo: 'cidade' },
+  pessoas: null, pq: '', comus: null, cq: '', comu: null, perfil: null, coment: {}, carregando: false, sid: '', ultimoPulso: 0, entrando: false };
+if (SOC.url.charAt(0) === '_') SOC.url = '';
+SOC.url = SOC.url.replace(/\/+$/, '');
+try { SOC.token = localStorage.getItem('pg_soc') || ''; SOC.eu = JSON.parse(localStorage.getItem('pg_soc_eu') || 'null'); } catch (e) {}
+function socGuarda() { try { localStorage.setItem('pg_soc', SOC.token || ''); localStorage.setItem('pg_soc_eu', JSON.stringify(SOC.eu)); } catch (e) {} }
+async function socApi(path, o) {
+  o = o || {};
+  if (!SOC.url) throw new Error('A Comunidade ainda não foi ativada nesta versão.');
+  const h = { 'Content-Type': 'application/json' };
+  if (SOC.token) h.Authorization = 'Bearer ' + SOC.token;
+  let r;
+  try { r = await fetch(SOC.url + path, { method: o.method || 'GET', headers: h, body: o.body ? JSON.stringify(o.body) : undefined }); }
+  catch (e) { throw new Error('Sem conexão com a Comunidade. Confira a internet.'); }
+  let j = {}; try { j = await r.json(); } catch (e) {}
+  if (r.status === 401 && path !== '/auth/google') { SOC.token = ''; SOC.eu = null; socGuarda(); }
+  if (!r.ok) throw new Error(j.erro || ('Erro ' + r.status));
+  return j;
+}
+async function socEntrar(silencioso) {
+  if (SOC.entrando) return;
+  if (!SOC.url) return silencioso || toast('A Comunidade ainda não foi ativada nesta versão.');
+  if (!GS.connected) { if (!silencioso) { toast('Primeiro entre com sua conta Google.'); googleConnect(); } return; }
+  SOC.entrando = true; if (view === 'social') render();
+  try {
+    const at = (await (await api('/api/google/token')).json()).token;
+    const j = await socApi('/auth/google', { method: 'POST', body: { access_token: at, tz: -new Date().getTimezoneOffset() } });
+    SOC.token = j.token; SOC.eu = j.eu; socGuarda();
+    SOC.feed = null; socPerfilDepois(true);
+    if (!silencioso) toast('Bem-vindo(a) à Comunidade, ' + (j.eu.nome || '').split(' ')[0] + '!');
+  } catch (e) { if (!silencioso) toast(e.message); }
+  finally { SOC.entrando = false; if (view === 'social') render(); }
+}
+let _perfT = null, _perfUlt = 0;
+function socPerfilDepois(ja) {
+  if (!SOC.token) return;
+  clearTimeout(_perfT);
+  _perfT = setTimeout(async () => {
+    _perfUlt = Date.now();
+    const s = jogoStats(), lendo = state.books.filter(b => b.status === 'reading').sort((a, b) => (b.lastRead || 0) - (a.lastRead || 0))[0];
+    try { await socApi('/perfil', { method: 'POST', body: { nivel: s.nivel, conquistas: Object.keys(G().conq).length, lendo: lendo ? lendo.title : '' } }); } catch (e) {}
+  }, ja ? 500 : Math.max(5000, 300000 - (Date.now() - _perfUlt)));
+}
+
+/* ---------- tempo de leitura contado pelo servidor (vale para os rankings) ---------- */
+async function socLeitura() {
+  if (!SOC.token) return;
+  const lendo = typeof R !== 'undefined' && R;
+  try {
+    if (lendo && (!SOC.sid || SOC.sidLivro !== R.b.id)) {
+      if (SOC.sid) { try { await socApi('/leitura/fim', { method: 'POST', body: { sid: SOC.sid } }); } catch (e) {} }
+      const j = await socApi('/leitura/inicio', { method: 'POST', body: { livro: R.b.title, autor: R.b.author } });
+      SOC.sid = j.sid; SOC.sidLivro = R.b.id; SOC.ultimoPulso = Date.now();
+    } else if (lendo && SOC.sid) {
+      const ativo = document.visibilityState === 'visible' && Date.now() - R.lastAct < 120000;
+      if (ativo && Date.now() - SOC.ultimoPulso >= 58000) {
+        SOC.ultimoPulso = Date.now();
+        const j = await socApi('/leitura/pulso', { method: 'POST', body: { sid: SOC.sid } });
+        if (j.streak != null && SOC.eu) { SOC.eu.streak = j.streak; socGuarda(); }
+      }
+    } else if (!lendo && SOC.sid) {
+      const sid = SOC.sid; SOC.sid = '';
+      await socApi('/leitura/fim', { method: 'POST', body: { sid } });
+    }
+  } catch (e) { if (/encerrada/.test(e.message)) SOC.sid = ''; }
+}
+setInterval(socLeitura, 5000);
+
+/* ---------- desenho dos posts ---------- */
+const TIPO_POST = { texto: ['💬', ''], resenha: ['⭐', 'Resenha'], frase: ['❝', 'Frase'], pagina: ['📄', 'Trecho'], pergunta: ['❓', 'Pergunta'], progresso: ['📈', 'Progresso'], conquista: ['🏅', 'Conquista'] };
+function avatar(u, cls) {
+  const ini = esc(((u && u.nome) || '?').trim().charAt(0).toUpperCase());
+  return u && u.foto ? `<img class="av ${cls || ''}" src="${esc(u.foto)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">` : `<span class="av ${cls || ''}" style="--h:${hashStr((u && u.id) || '') % 360}">${ini}</span>`;
+}
+function quando(ts) {
+  const d = Date.now() / 1000 - ts;
+  if (d < 60) return 'agora'; if (d < 3600) return Math.floor(d / 60) + ' min'; if (d < 86400) return Math.floor(d / 3600) + ' h';
+  if (d < 7 * 86400) return Math.floor(d / 86400) + ' d';
+  return new Date(ts * 1000).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' });
+}
+function socPostHtml(p) {
+  const [ic, rot] = TIPO_POST[p.tipo] || TIPO_POST.texto;
+  const corpo = p.tipo === 'frase' || p.tipo === 'pagina'
+    ? `<blockquote class="spq">${esc(p.texto)}</blockquote>`
+    : `<p class="spt">${esc(p.texto)}</p>`;
+  const livro = p.livro ? `<button class="splv" data-g="buscalivro" data-q="${esc(p.livro)}">📘 ${esc(p.livro)}${p.livro_autor ? ' · ' + esc(p.livro_autor) : ''}${p.pagina ? ' · pág. ' + p.pagina : ''}</button>` : '';
+  const nota = p.nota ? `<span class="spst">${'★'.repeat(p.nota)}${'☆'.repeat(5 - p.nota)}</span>` : '';
+  const com = SOC.coment[p.id];
+  return `<article class="post spost" data-sp="${esc(p.id)}">
+    <div class="sph">${avatar(p.autor)}<div style="flex:1;min-width:0"><button class="spn" data-g="perfil" data-id="${esc(p.autor.id)}">${esc(p.autor.nome)}</button> <span class="lv">nv ${p.autor.nivel || 1}</span>
+      <div class="muted small">${rot ? ic + ' ' + rot + ' · ' : ''}${quando(p.criado)}${p.comunidade ? ` · <button class="spc" data-g="comu" data-id="${esc(p.comunidade.id)}">${esc(p.comunidade.emoji || '📚')} ${esc(p.comunidade.nome)}</button>` : ''}</div></div>
+      <button class="spm" data-g="postmenu" data-id="${esc(p.id)}" aria-label="Mais opções">⋯</button></div>
+    <div class="pbody">${nota}${corpo}${livro}</div>
+    <div class="spa"><button class="${p.curti ? 'on' : ''}" data-g="curtir" data-id="${esc(p.id)}">${p.curti ? '❤️' : '🤍'} ${p.curtidas || ''}</button>
+      <button data-g="coments" data-id="${esc(p.id)}">💬 ${p.comentarios || ''}</button></div>
+    ${com ? `<div class="spcm">${com.lista ? com.lista.map(c => `<div class="cmi">${avatar(c.autor, 'sm')}<div><button class="spn" data-g="perfil" data-id="${esc(c.autor.id)}">${esc(c.autor.nome)}</button> ${esc(c.texto)} <small class="muted">${quando(c.criado)}</small>${c.meu ? ` <button class="lnk" data-g="cmdel" data-id="${esc(c.id)}" data-p="${esc(p.id)}">apagar</button>` : ''}</div></div>`).join('') || '<p class="muted small">Seja o primeiro a comentar.</p>' : '<p class="muted small">Carregando…</p>'}
+      <form class="cmf" data-p="${esc(p.id)}"><input name="t" maxlength="500" placeholder="Escreva um comentário…" autocomplete="off"><button class="btn sm primary">Enviar</button></form></div>` : ''}
+  </article>`;
+}
+function achaPost(id) {
+  for (const l of [SOC.feed, SOC.comu && SOC.comu.posts, SOC.perfil && SOC.perfil.posts]) if (l) { const p = l.find(x => x.id === id); if (p) return p; }
+  return null;
+}
+function repintaPost(id) {
+  const p = achaPost(id); if (!p) return;
+  document.querySelectorAll(`[data-sp="${CSS.escape(id)}"]`).forEach(el => { el.outerHTML = socPostHtml(p); });
+}
+
+/* ---------- compor post ---------- */
+const COMP = { aberto: false, d: {} };
+function abrirComposer(d) {
+  if (!SOC.token) { view = 'social'; render(); return toast('Entre na Comunidade para publicar.'); }
+  COMP.d = Object.assign({ tipo: 'texto', texto: '', livro: '', livro_autor: '', gid: '', pagina: 0, nota: 0, comunidade: (SOC.aba === 'comu' && SOC.comu && SOC.comu.comunidade.eu_membro) ? SOC.comu.comunidade.id : '' }, d || {});
+  COMP.aberto = true; pintaComposer();
+}
+function pintaComposer() {
+  let el = $('#scomp');
+  if (!COMP.aberto) { if (el) el.remove(); return; }
+  if (!el) { el = document.createElement('div'); el.id = 'scomp'; el.className = 'smodal'; document.body.appendChild(el); }
+  const d = COMP.d;
+  const livros = state.books.filter(b => b.status !== 'want' || b.lastRead).slice(0, 40);
+  const comus = (SOC.minhas || []);
+  el.innerHTML = `<form class="smbox" id="compForm"><div class="hph"><span>Nova publicação</span><button type="button" data-g="compfecha" aria-label="Fechar">×</button></div>
+    <div class="ctipos">${['texto', 'resenha', 'frase', 'pergunta', 'pagina'].map(t => `<button type="button" class="chip ${d.tipo === t ? 'on' : ''}" data-g="comptipo" data-v="${t}">${TIPO_POST[t][0]} ${TIPO_POST[t][1] || 'Texto'}</button>`).join('')}</div>
+    ${d.tipo === 'resenha' ? `<div class="cstars">${[1, 2, 3, 4, 5].map(n => `<button type="button" class="star ${n <= d.nota ? 'on' : ''}" data-g="compnota" data-v="${n}">★</button>`).join('')}</div>` : ''}
+    <textarea id="compTxt" rows="${d.tipo === 'pagina' ? 7 : 4}" maxlength="2000" placeholder="${{ texto: 'O que você está pensando sobre o que lê?', resenha: 'O que achou do livro? (sem spoilers, por favor!)', frase: 'Cole a frase que te marcou', pergunta: 'Pergunte algo aos outros leitores', pagina: 'Cole o trecho que quer compartilhar' }[d.tipo]}">${esc(d.texto)}</textarea>
+    <label class="small">Livro (opcional)<select id="compLivro"><option value="">Nenhum</option>${livros.map(b => `<option value="${esc(b.id)}" ${b.title === d.livro ? 'selected' : ''}>${esc(b.title)}</option>`).join('')}${d.livro && !livros.some(b => b.title === d.livro) ? `<option value="__x" selected>${esc(d.livro)}</option>` : ''}</select></label>
+    <label class="small">Publicar em<select id="compComu"><option value="">Meu perfil (seguidores)</option>${comus.map(c => `<option value="${esc(c.id)}" ${c.id === d.comunidade ? 'selected' : ''}>${esc(c.emoji)} ${esc(c.nome)}</option>`).join('')}</select></label>
+    <div class="bookact" style="justify-content:flex-end"><button type="button" class="btn" data-g="compfecha">Cancelar</button><button class="btn primary" ${COMP.enviando ? 'disabled' : ''}>${COMP.enviando ? 'Publicando…' : 'Publicar'}</button></div></form>`;
+  setTimeout(() => { const t = $('#compTxt'); if (t) t.focus(); }, 30);
+}
+function lerComposer() {
+  const d = COMP.d, t = $('#compTxt'), lv = $('#compLivro'), cm = $('#compComu');
+  if (t) d.texto = t.value;
+  if (lv && lv.value && lv.value !== '__x') { const b = state.books.find(x => x.id === lv.value); if (b) { d.livro = b.title; d.livro_autor = b.author || ''; d.gid = b.gid || ''; } }
+  else if (lv && !lv.value) { d.livro = ''; d.livro_autor = ''; d.gid = ''; }
+  if (cm) d.comunidade = cm.value;
+}
+async function publicar() {
+  lerComposer();
+  const d = COMP.d;
+  if ((d.texto || '').trim().length < 2) return toast('Escreva alguma coisa antes de publicar.');
+  COMP.enviando = true; pintaComposer();
+  try {
+    const j = await socApi('/posts', { method: 'POST', body: d });
+    COMP.aberto = false; COMP.enviando = false; pintaComposer();
+    if (SOC.feed) SOC.feed.unshift(j.post);
+    if (SOC.comu && SOC.comu.comunidade.id === d.comunidade) SOC.comu.posts.unshift(j.post);
+    gameConta('posts'); toast('Publicado!');
+    if (view === 'social' || view === 'foryou') render();
+  } catch (e) { COMP.enviando = false; pintaComposer(); toast(e.message); }
+}
+
+/* ---------- carregar dados ---------- */
+async function carrega(fn) {
+  try { await fn(); SOC.erro = ''; } catch (e) { SOC.erro = e.message; SOC.erroEm = Date.now(); toast(e.message); }
+  SOC.carregando = false;
+  if (view === 'social' || view === 'foryou') render();
+}
+// não tenta de novo sozinho por 15 s depois de um erro (evita repetir pedidos sem parar)
+const podeCarregar = () => !SOC.carregando && Date.now() - (SOC.erroEm || 0) > 15000;
+const falhou = () => SOC.erro && !podeCarregar() ? `<div class="card empty">${esc(SOC.erro)}<br><button class="btn sm" data-g="retry">Tentar de novo</button></div>` : SKEL;
+async function carregaFeed(mais) {
+  const antes = mais && SOC.feed && SOC.feed.length ? '?antes=' + SOC.feed[SOC.feed.length - 1].criado : '';
+  const j = await socApi('/feed' + antes);
+  let posts = j.posts;
+  if (!mais && posts.length < 5) { const d = await socApi('/descobrir'); const ids = new Set(posts.map(p => p.id)); posts = posts.concat(d.posts.filter(p => !ids.has(p.id))); SOC.desc = true; }
+  SOC.feed = mais ? (SOC.feed || []).concat(posts) : posts;
+  SOC.feedFim = j.posts.length < 30;
+}
+async function carregaMinhas() { SOC.minhas = (await socApi('/comunidades?minhas=1')).comunidades; G().cont.comunidades = SOC.minhas.length; }
+
+/* ---------- tela da Comunidade ---------- */
+const ESCOPOS = [['amigos', '👥 Amigos'], ['cidade', '🏙️ Cidade'], ['estado', '🗺️ Estado'], ['pais', '🏳️ País'], ['global', '🌎 Mundo']];
+let _nomePais = null;
+function nomePais(c) { try { _nomePais = _nomePais || new Intl.DisplayNames(['pt-BR'], { type: 'region' }); return _nomePais.of(c); } catch (e) { return c; } }
+function renderSocial() {
+  if (!SOC.url) return `<section class="card"><h2>Comunidade</h2><p class="muted">A Comunidade (amigos, posts, rankings e comunidades de leitura) ainda não foi ativada nesta versão do Páginas. Ela chega numa próxima atualização.</p></section>`;
+  if (!SOC.token) {
+    if (GS.connected && !SOC.entrando && !SOC.tentou) { SOC.tentou = true; setTimeout(() => socEntrar(true), 0); }
+    return `<section class="card center socin"><div style="font-size:3rem">👥</div><h2>Leia junto com outras pessoas</h2>
+      <p class="muted">Siga amigos, compartilhe frases e resenhas, entre em comunidades de leitura e dispute os rankings da sua cidade, do estado, do país e do mundo.</p>
+      <p class="small muted">Os rankings usam só o tempo lido no leitor do Páginas, contado pelo servidor, para ninguém conseguir inventar horas.</p>
+      <button class="btn primary" data-g="socentrar" ${SOC.entrando ? 'disabled' : ''}>${SOC.entrando ? 'Entrando…' : GS.connected ? 'Entrar na Comunidade' : 'Entrar com Google'}</button></section>`;
+  }
+  const abas = [['feed', '🏠 Feed'], ['rank', '🏆 Rankings'], ['pessoas', '👥 Amigos'], ['comus', '🏘️ Comunidades'], ['eu', '👤 Perfil']];
+  let h = `<div class="stabs">${abas.map(([k, l]) => `<button class="chip ${SOC.aba === k || (SOC.aba === 'comu' && k === 'comus') || (SOC.aba === 'perfil' && k === 'pessoas') ? 'on' : ''}" data-g="saba" data-v="${k}">${l}</button>`).join('')}</div>`;
+  if (SOC.aba === 'feed') h += telaFeed();
+  else if (SOC.aba === 'rank') h += telaRank();
+  else if (SOC.aba === 'pessoas') h += telaPessoas();
+  else if (SOC.aba === 'comus') h += telaComus();
+  else if (SOC.aba === 'comu') h += telaComu();
+  else if (SOC.aba === 'perfil' || SOC.aba === 'eu') h += telaPerfil();
+  return `<div class="feed social">${h}</div>`;
+}
+function caixaPublicar(dica) {
+  return `<button class="card scomp" data-g="compor">${avatar(SOC.eu)}<span class="muted">${esc(dica || 'Compartilhe o que você está lendo…')}</span></button>`;
+}
+function telaFeed() {
+  if (!SOC.feed) { if (podeCarregar()) { SOC.carregando = true; carrega(() => Promise.all([carregaFeed(false), carregaMinhas()])); } return caixaPublicar() + falhou(); }
+  return caixaPublicar() + (SOC.desc && SOC.feed.length ? '<p class="muted small" style="margin:.2rem .3rem .8rem">Novidades de leitores de todo lugar. Siga pessoas e entre em comunidades para montar o seu feed.</p>' : '') +
+    (SOC.feed.length ? SOC.feed.map(socPostHtml).join('') : '<div class="card empty">Ainda não há publicações. Que tal a primeira?</div>') +
+    (SOC.feed.length && !SOC.feedFim ? '<p class="center"><button class="btn" data-g="feedmais">Ver mais</button></p>' : '');
+}
+function fmtValor(v, tipo) {
+  if (tipo === 'streak') return v + (v === 1 ? ' dia' : ' dias');
+  const m = Math.round(v / 60); return m >= 60 ? (Math.floor(m / 60) + ' h ' + (m % 60) + ' min') : (m + ' min');
+}
+function telaRank() {
+  const q = SOC.rq;
+  const sel = (k, op) => `<div class="rsel">${op.map(([v, l]) => `<button class="chip ${q[k] === v ? 'on' : ''}" data-g="rq" data-k="${k}" data-v="${v}">${l}</button>`).join('')}</div>`;
+  let h = `<section class="card"><h2>🏆 Rankings de leitura</h2>
+    ${sel('tipo', [['tempo', '⏱️ Tempo lendo'], ['streak', '🔥 Sequência']])}
+    ${q.tipo === 'tempo' ? sel('periodo', [['semana', 'Últimos 7 dias'], ['mes', '30 dias'], ['total', 'Desde sempre']]) : ''}
+    ${sel('escopo', ESCOPOS)}
+    <p class="muted small" style="margin:.4rem 0 0">Só conta o tempo lido no leitor do Páginas, medido pelo servidor a cada minuto (máximo de 8 h por dia). A cidade vem da sua conexão de internet.</p></section>`;
+  const r = SOC.rank;
+  const chave = q.tipo + q.periodo + q.escopo;
+  if (!r || r.chave !== chave) {
+    if (podeCarregar()) { SOC.carregando = true; carrega(async () => { try { const j = await socApi(`/ranking?tipo=${q.tipo}&periodo=${q.periodo}&escopo=${q.escopo}`); j.chave = chave; SOC.rank = j; if (q.escopo === 'cidade' && q.tipo === 'tempo' && q.periodo === 'semana' && j.eu && j.eu.pos && j.eu.pos <= 10 && j.eu.valor >= 600 && j.lista.length >= 3 && !G().cont.top10) gameConta('top10'); } finally { SOC.carregando = false; } }); }
+    return h + falhou();
+  }
+  const local = { cidade: r.local.cidade, estado: r.local.estado, pais: nomePais(r.local.pais) }[q.escopo];
+  const med = p => p === 1 ? '🥇' : p === 2 ? '🥈' : p === 3 ? '🥉' : p;
+  const linha = x => `<button class="rk ${x.usuario.id === SOC.eu.id ? 'eu' : ''}" data-g="perfil" data-id="${esc(x.usuario.id)}"><span class="rkp">${x.pos ? med(x.pos) : '–'}</span>${avatar(x.usuario, 'sm')}<span class="rkn">${esc(x.usuario.nome)}<small class="muted"> ${esc([x.usuario.cidade, x.usuario.estado].filter(Boolean).join(', '))}</small></span><b>${fmtValor(x.valor, r.tipo)}</b></button>`;
+  h += `<section class="card"><h3 style="margin-bottom:.6rem">${esc(ESCOPOS.find(e => e[0] === q.escopo)[1])}${local ? ': ' + esc(local) : ''}</h3>
+    ${r.lista.length ? r.lista.map(linha).join('') : '<p class="muted">Ninguém leu neste período ainda. Leia alguns minutos e seja o primeiro!</p>'}
+    ${r.eu && !r.lista.some(x => x.usuario.id === SOC.eu.id) ? '<div class="rksep">⋯</div>' + linha(r.eu) : ''}
+    ${q.escopo === 'amigos' && r.lista.length <= 1 ? '<p class="small muted">Siga outros leitores na aba Amigos para disputar com eles.</p>' : ''}</section>`;
+  return h;
+}
+function cartaoPessoa(u) {
+  return `<div class="pess">${avatar(u)}<button class="pessn" data-g="perfil" data-id="${esc(u.id)}"><b>${esc(u.nome)}</b><small class="muted">nível ${u.nivel} · 🔥 ${u.streak} · ${u.horas} h lidas${u.cidade ? ' · ' + esc(u.cidade) : ''}</small></button>
+    ${u.id !== (SOC.eu && SOC.eu.id) ? `<button class="btn sm ${u.eu_sigo ? '' : 'primary'}" data-g="seguir" data-id="${esc(u.id)}" data-v="${u.eu_sigo ? 1 : 0}">${u.eu_sigo ? 'Seguindo' : 'Seguir'}</button>` : ''}</div>`;
+}
+function telaPessoas() {
+  if (!SOC.pessoas) { if (podeCarregar()) { SOC.carregando = true; carrega(async () => { try { SOC.pessoas = (await socApi('/usuarios?q=' + encodeURIComponent(SOC.pq))).usuarios; } finally { SOC.carregando = false; } }); } }
+  return `<section class="card"><h2>👥 Encontre leitores</h2>
+    <form class="fsearch" id="pessForm"><input id="pessQ" type="search" value="${esc(SOC.pq)}" placeholder="Nome de um amigo…" autocomplete="off"><button class="btn primary">Buscar</button></form>
+    <p class="muted small">${SOC.pq ? 'Resultados' : 'Sugestões perto de você'}</p>
+    ${SOC.pessoas ? (SOC.pessoas.length ? SOC.pessoas.map(cartaoPessoa).join('') : '<p class="muted">Ninguém encontrado.</p>') : '<p class="muted">Carregando…</p>'}
+    <div class="bookact" style="margin-top:.6rem"><button class="btn sm" data-g="lista" data-v="seguindo" data-id="${esc(SOC.eu.id)}">Quem eu sigo</button><button class="btn sm" data-g="lista" data-v="seguidores" data-id="${esc(SOC.eu.id)}">Meus seguidores</button></div></section>`;
+}
+function cartaoComu(c) {
+  return `<button class="comuc" data-g="comu" data-id="${esc(c.id)}"><span class="comue">${esc(c.emoji || '📚')}</span><span style="flex:1;min-width:0"><b>${esc(c.nome)}</b><small class="muted">${c.membros} ${c.membros === 1 ? 'membro' : 'membros'} · ${c.posts} posts${c.eu_membro ? ' · ✓ você participa' : ''}</small>${c.descricao ? `<small>${esc(c.descricao)}</small>` : ''}</span></button>`;
+}
+function telaComus() {
+  if (!SOC.comus) { if (podeCarregar()) { SOC.carregando = true; carrega(async () => { try { const [a] = await Promise.all([socApi('/comunidades?q=' + encodeURIComponent(SOC.cq)), carregaMinhas()]); SOC.comus = a.comunidades; } finally { SOC.carregando = false; } }); } }
+  const minhas = SOC.minhas || [];
+  return `${minhas.length ? `<section class="card"><h2>Minhas comunidades</h2>${minhas.map(cartaoComu).join('')}</section>` : ''}
+    <section class="card"><h2>🏘️ Comunidades de leitura</h2>
+    <form class="fsearch" id="comuForm"><input id="comuQ" type="search" value="${esc(SOC.cq)}" placeholder="Tema, livro ou autor…" autocomplete="off"><button class="btn primary">Buscar</button></form>
+    ${SOC.comus ? (SOC.comus.length ? SOC.comus.map(cartaoComu).join('') : '<p class="muted">Nenhuma comunidade encontrada. Crie a primeira!</p>') : '<p class="muted">Carregando…</p>'}</section>
+    <section class="card"><h2>Criar comunidade</h2><form id="novaComu" class="ncomu">
+      <div class="row"><label style="flex:0 0 5rem">Emoji<input name="emoji" maxlength="4" value="📚"></label><label style="flex:1">Nome<input name="nome" maxlength="60" required placeholder="Ex.: Clube do Machado de Assis"></label></div>
+      <label>Tema<input name="tema" maxlength="60" placeholder="Ex.: literatura brasileira, terror, vestibular…"></label>
+      <label>Descrição<textarea name="descricao" rows="2" maxlength="300" placeholder="Sobre o que vocês vão conversar?"></textarea></label>
+      <button class="btn primary">Criar</button></form></section>`;
+}
+function telaComu() {
+  const c = SOC.comu;
+  if (!c) return falhou();
+  const k = c.comunidade;
+  return `<section class="card comuh"><button class="lnk" data-g="saba" data-v="comus">← Comunidades</button><div class="comut"><span class="comue big">${esc(k.emoji || '📚')}</span><div style="flex:1"><h2 style="margin:0">${esc(k.nome)}</h2><small class="muted">${k.membros} membros · ${k.posts} posts${k.tema ? ' · ' + esc(k.tema) : ''}</small></div>
+    <button class="btn ${k.eu_membro ? '' : 'primary'}" data-g="comuentra" data-id="${esc(k.id)}" data-v="${k.eu_membro ? 1 : 0}">${k.eu_membro ? 'Sair' : 'Participar'}</button></div>${k.descricao ? `<p>${esc(k.descricao)}</p>` : ''}</section>
+    ${k.eu_membro ? caixaPublicar('Escreva para a comunidade ' + k.nome + '…') : ''}
+    ${c.posts.length ? c.posts.map(socPostHtml).join('') : '<div class="card empty">Nenhuma publicação ainda.</div>'}`;
+}
+function telaPerfil() {
+  const alvo = SOC.aba === 'eu' ? SOC.eu.id : SOC.perfilId;
+  const P = SOC.perfil;
+  if (!P || P.usuario.id !== alvo) {
+    if (podeCarregar()) { SOC.carregando = true; carrega(async () => { try { SOC.perfil = await socApi('/usuarios/' + encodeURIComponent(alvo)); } finally { SOC.carregando = false; } }); }
+    return falhou();
+  }
+  const u = P.usuario, eu = u.eu;
+  const local = [u.cidade, u.estado, u.pais ? nomePais(u.pais) : ''].filter(Boolean).join(', ');
+  return `<section class="card perf">${avatar(u, 'lg')}<div style="flex:1;min-width:0"><h2 style="margin:0">${esc(u.nome)}</h2><small class="muted">Nível ${u.nivel} · ${esc(tituloDe(u.nivel))}${local ? ' · ' + esc(local) : ''}</small>
+      ${u.bio ? `<p style="margin:.4rem 0">${esc(u.bio)}</p>` : ''}${u.lendo ? `<p class="small" style="margin:.3rem 0">📖 Lendo: <b>${esc(u.lendo)}</b></p>` : ''}
+      <div class="pstats"><span><b>🔥 ${u.streak}</b>sequência</span><span><b>${u.horas} h</b>lidas</span><span><b>${u.conquistas}</b>conquistas</span><button data-g="lista" data-v="seguidores" data-id="${esc(u.id)}"><b>${u.seguidores}</b>seguidores</button><button data-g="lista" data-v="seguindo" data-id="${esc(u.id)}"><b>${u.seguindo}</b>seguindo</button></div>
+      <div class="bookact">${eu ? '<button class="btn sm" data-g="editbio">✏️ Editar perfil</button><button class="btn sm" data-g="socsair">Sair da Comunidade</button>'
+        : `<button class="btn sm ${u.eu_sigo ? '' : 'primary'}" data-g="seguir" data-id="${esc(u.id)}" data-v="${u.eu_sigo ? 1 : 0}">${u.eu_sigo ? 'Seguindo' : 'Seguir'}</button><button class="btn sm" data-g="bloquear" data-id="${esc(u.id)}" data-v="${u.bloqueado ? 1 : 0}">${u.bloqueado ? 'Desbloquear' : 'Bloquear'}</button>`}</div></div></section>
+    ${P.lista ? `<section class="card"><h3>${P.lista.titulo}</h3>${P.lista.usuarios.length ? P.lista.usuarios.map(cartaoPessoa).join('') : '<p class="muted">Ninguém por aqui ainda.</p>'}</section>` : ''}
+    ${eu ? caixaPublicar() : ''}
+    ${P.posts.length ? P.posts.map(socPostHtml).join('') : '<div class="card empty">Nenhuma publicação ainda.</div>'}
+    ${eu ? '<p class="center"><button class="btn sm danger" data-g="apagaconta">Apagar minha conta da Comunidade</button></p>' : ''}`;
+}
+
+/* ---------- posts dos amigos dentro do "Para você" ---------- */
+function misturaSocial(html) {
+  if (!SOC.token || !SOC.feed || !SOC.feed.length || feed.filter === 'saved') return html;
+  const partes = html.split('<article class="post"');
+  if (partes.length < 3) return html;
+  const sp = SOC.feed.slice(0, 8);
+  let out = partes[0], k = 0;
+  for (let i = 1; i < partes.length; i++) {
+    out += '<article class="post"' + partes[i];
+    if (i % 3 === 0 && k < sp.length) out += socPostHtml(sp[k++]);
+  }
+  return out;
+}
+
+/* ---------- ligações com as telas que já existem ---------- */
+const _vToday7 = VIEWS.today;
+VIEWS.today = () => cartaoJogo() + _vToday7();
+const _vStats7 = VIEWS.stats;
+VIEWS.stats = () => _vStats7() + gradeConquistas();
+const _vFor7 = VIEWS.foryou;
+VIEWS.foryou = () => {
+  if (SOC.token && !SOC.feed && podeCarregar()) { SOC.carregando = true; carrega(async () => { try { await carregaFeed(false); } finally { SOC.carregando = false; } }); }
+  const h = _vFor7();
+  const comp = SOC.token ? caixaPublicar() : '';
+  return misturaSocial(h.replace('<div class="stories">', comp + '<div class="stories">'));
+};
+VIEWS.social = renderSocial;
+const _vSet7 = VIEWS.settings;
+VIEWS.settings = () => {
+  const t = temaEscolhido(), n = notifCfg();
+  const ap = `<section class="card"><h2>Aparência</h2><div class="rsel">${[['auto', '🌗 Automático'], ['claro', '☀️ Claro'], ['escuro', '🌙 Escuro']].map(([v, l]) => `<button class="chip ${t === v ? 'on' : ''}" data-g="tema" data-v="${v}">${l}</button>`).join('')}</div>
+    <p class="muted small" style="margin:.5rem 0 0">Automático segue o tema do celular ou do computador.</p></section>
+    <section class="card"><h2>💭 Reflexões</h2><p class="muted small" style="margin-top:0">Notificações com frases e perguntas que puxam o pensamento crítico, ${APP.plat === 'android' ? 'no celular' : 'no Windows'}, mesmo com o app fechado.</p>
+      <label class="tgl"><input type="checkbox" id="notOn" ${n.on ? 'checked' : ''} data-g="notif"> Receber reflexões</label>
+      <div class="row" style="margin-top:.4rem">${[0, 1, 2].map(i => `<label style="flex:1">${i + 1}º horário<input type="time" class="notH" value="${esc(n.horas[i] || '')}" ${n.on ? '' : 'disabled'}></label>`).join('')}</div>
+      <div class="bookact" style="margin-top:.5rem"><button class="btn sm primary" data-g="notifsalva">Salvar horários</button><button class="btn sm" data-g="notifteste">Ver uma agora</button></div></section>
+    <section class="card"><h2>🧭 Tutorial</h2><p class="muted small" style="margin-top:0">Reveja o passo a passo de como usar o Páginas.</p><button class="btn sm" data-g="tutorial">Ver o tutorial</button></section>`;
+  return _vSet7() + ap;
+};
+
+/* ---------- compartilhar a partir do leitor, do livro e das resenhas ---------- */
+const _showTool7 = showTool;
+showTool = function (sel) {
+  _showTool7(sel);
+  const el = $('#rtool');
+  if (el && SOC.token) { el.insertAdjacentHTML('beforeend', '<button data-g="sharesel">💬 Compartilhar</button>'); el.style.width = 'auto'; }
+};
+const _readerShell7 = readerShell;
+readerShell = function (inner, theme) {
+  if (SOC.token) inner = inner.replace('<button class="btn sm" data-x="hllist"', '<button class="btn sm" data-g="sharepage" title="Compartilhar este trecho">💬</button><button class="btn sm" data-x="hllist"');
+  return _readerShell7(inner, theme);
+};
+const _paintPanel7 = paintPanel;
+paintPanel = function () {
+  _paintPanel7();
+  const p = HS.panel, a = document.querySelector('.hpa');
+  if (SOC.token && p && p.text && a && !a.querySelector('[data-g=sharepanel]')) a.insertAdjacentHTML('beforeend', '<button class="btn sm" data-g="sharepanel">💬 Compartilhar</button>');
+};
+const _explain7 = explain;
+explain = function (o) { gameConta('ia'); return _explain7.apply(this, arguments); };
+function trechoDaPagina() {
+  const el = $('#rbody article'); if (!el) return '';
+  const t = el.innerText.replace(/\s+\n/g, '\n').trim();
+  return t.length > 700 ? t.slice(0, 700).replace(/\s+\S*$/, '') + '…' : t;
+}
+document.addEventListener('submit', e => {
+  const f = e.target;
+  if (f.id === 'finForm' && SOC.token) {
+    const b = state.books.find(x => x.id === fin.id), note = (f.note && f.note.value || '').trim(), nota = fin.rating;
+    if (b) setTimeout(() => { if (confirm('Livro concluído! 🎉 Quer compartilhar ' + (note ? 'sua resenha' : 'que terminou') + ' com a Comunidade?')) abrirComposer({ tipo: 'resenha', texto: note || ('Terminei de ler “' + b.title + '”!'), nota, livro: b.title, livro_autor: b.author || '', gid: b.gid || '' }); }, 400);
+  }
+  if (f.id === 'compForm') { e.preventDefault(); publicar(); }
+  if (f.classList.contains('cmf')) {
+    e.preventDefault();
+    const id = f.dataset.p, t = f.t.value.trim(); if (!t) return;
+    f.t.value = '';
+    carrega(async () => { await socApi('/posts/' + id + '/comentarios', { method: 'POST', body: { texto: t } }); const p = achaPost(id); if (p) p.comentarios++; SOC.coment[id] = { lista: (await socApi('/posts/' + id + '/comentarios')).comentarios }; repintaPost(id); });
+  }
+  if (f.id === 'pessForm') { e.preventDefault(); SOC.pq = $('#pessQ').value.trim(); SOC.pessoas = null; render(); }
+  if (f.id === 'comuForm') { e.preventDefault(); SOC.cq = $('#comuQ').value.trim(); SOC.comus = null; render(); }
+  if (f.id === 'novaComu') {
+    e.preventDefault();
+    const d = { nome: f.nome.value, emoji: f.emoji.value, tema: f.tema.value, descricao: f.descricao.value };
+    carrega(async () => { const j = await socApi('/comunidades', { method: 'POST', body: d }); gameConta('comunidades'); SOC.comus = null; SOC.minhas = null; await abreComu(j.comunidade.id); toast('Comunidade criada!'); });
+  }
+}, true);
+async function abreComu(id) {
+  SOC.aba = 'comu'; SOC.comu = null; render();
+  SOC.comu = await socApi('/comunidades/' + encodeURIComponent(id));
+}
+function irSocial(aba) { view = 'social'; SOC.aba = aba || SOC.aba; render(); window.scrollTo(0, 0); }
+
+/* ---------- cliques ---------- */
+document.addEventListener('click', e => {
+  // quiz respondido (conta para missões e conquistas)
+  const qz = e.target.closest('[data-x=pquiz]');
+  if (qz && !(qz.dataset.id in feed.quiz)) {
+    const id = qz.dataset.id, v = Number(qz.dataset.v);
+    setTimeout(() => { const p = feed.byId[id]; gameConta('quiz'); if (p && p.a === v) gameConta('quizOk'); }, 0);
+  }
+  const el = e.target.closest('[data-g]'); if (!el) return;
+  const a = el.dataset.g, id = el.dataset.id, v = el.dataset.v;
+  switch (a) {
+    case 'tema': state.settings.tema = v; Store.save(state); aplicaTema(); render(); break;
+    case 'irconq': view = 'stats'; render(); setTimeout(() => { const c = $('#conq'); if (c) c.scrollIntoView({ behavior: 'smooth' }); }, 50); break;
+    case 'irrank': irSocial('rank'); break;
+    case 'celok': fechaCel(); break;
+    case 'celshare': { const c = $('#cel'); const n = c && c.dataset.nome, em = c && c.dataset.e; fechaCel(); abrirComposer({ tipo: 'conquista', texto: `${em} Desbloqueei a conquista “${n}” no Páginas!` }); break; }
+    case 'tutorial': tutorialInicia(); break;
+    case 'tutprox': TUT.i++; tutorialMostra(); break;
+    case 'tutvolta': TUT.i = Math.max(0, TUT.i - 1); tutorialMostra(); break;
+    case 'tutpular': tutorialFim(false); break;
+    case 'notif': {
+      const on = el.checked;
+      document.querySelectorAll('.notH').forEach(i => { i.disabled = !on; });
+      if (on && APP.plat === 'android' && window.PaginasAndroid && PaginasAndroid.pedirPermissao) PaginasAndroid.pedirPermissao();
+      state.settings.reflex = Object.assign(notifCfg(), { on }); Store.save(state); aplicaNotif(true);
+      break;
+    }
+    case 'notifsalva': {
+      const horas = [...document.querySelectorAll('.notH')].map(i => i.value).filter(Boolean);
+      state.settings.reflex = Object.assign(notifCfg(), { horas: horas.length ? horas : ['09:00'] }); Store.save(state); aplicaNotif(true);
+      break;
+    }
+    case 'notifteste': {
+      const l = reflexoes(), r = l[Math.floor(Math.random() * l.length)];
+      if (APP.plat === 'android' && window.PaginasAndroid && PaginasAndroid.reflexaoAgora) PaginasAndroid.reflexaoAgora();
+      else if (IS_APP && APP.plat === 'windows') api('/api/notif/teste', { method: 'POST' }).catch(() => toast('💭 ' + r.t));
+      else toast('💭 ' + r.t);
+      break;
+    }
+    case 'reflshare': { const r = reflexaoDoDia(); abrirComposer({ tipo: 'frase', texto: r.t + (r.a ? ' — ' + r.a : '') }); break; }
+    case 'socentrar': socEntrar(false); break;
+    case 'socsair': if (confirm('Sair da Comunidade neste aparelho?')) { socApi('/sair', { method: 'POST' }).catch(() => {}); SOC.token = ''; SOC.eu = null; SOC.tentou = true; socGuarda(); render(); } break;
+    case 'apagaconta':
+      if (confirm('Apagar sua conta da Comunidade? Seus posts, comentários, seguidores e posição nos rankings serão apagados para sempre. Seus livros e progresso neste aparelho continuam.'))
+        carrega(async () => { await socApi('/eu', { method: 'DELETE' }); SOC.token = ''; SOC.eu = null; SOC.tentou = true; socGuarda(); toast('Conta da Comunidade apagada.'); });
+      break;
+    case 'saba': SOC.aba = v; if (v === 'eu') SOC.perfil = null; if (v === 'feed') SOC.feed = SOC.feed; render(); window.scrollTo(0, 0); break;
+    case 'compor': abrirComposer(); break;
+    case 'compfecha': COMP.aberto = false; pintaComposer(); break;
+    case 'comptipo': lerComposer(); COMP.d.tipo = v; pintaComposer(); break;
+    case 'compnota': lerComposer(); COMP.d.nota = Number(v); pintaComposer(); break;
+    case 'feedmais': carrega(() => carregaFeed(true)); break;
+    case 'curtir': {
+      const p = achaPost(id); if (!p) break;
+      p.curti = !p.curti; p.curtidas += p.curti ? 1 : -1; repintaPost(id);
+      socApi('/posts/' + id + '/curtir', { method: 'POST' }).then(j => { p.curti = j.curti; p.curtidas = j.curtidas; repintaPost(id); if (j.curti && !p.meu) gameConta('curtidas'); })
+        .catch(err => { p.curti = !p.curti; p.curtidas += p.curti ? 1 : -1; repintaPost(id); toast(err.message); });
+      break;
+    }
+    case 'coments':
+      if (SOC.coment[id]) { delete SOC.coment[id]; repintaPost(id); break; }
+      SOC.coment[id] = {}; repintaPost(id);
+      socApi('/posts/' + id + '/comentarios').then(j => { SOC.coment[id] = { lista: j.comentarios }; repintaPost(id); }).catch(err => toast(err.message));
+      break;
+    case 'cmdel': if (confirm('Apagar este comentário?')) carrega(async () => { await socApi('/comentarios/' + id, { method: 'DELETE' }); const p = achaPost(el.dataset.p); if (p) p.comentarios--; SOC.coment[el.dataset.p] = { lista: (await socApi('/posts/' + el.dataset.p + '/comentarios')).comentarios }; repintaPost(el.dataset.p); }); break;
+    case 'postmenu': {
+      const p = achaPost(id); if (!p) break;
+      if (p.meu) { if (confirm('Apagar esta publicação?')) carrega(async () => { await socApi('/posts/' + id, { method: 'DELETE' }); for (const l of [SOC.feed, SOC.comu && SOC.comu.posts, SOC.perfil && SOC.perfil.posts]) if (l) { const i = l.findIndex(x => x.id === id); if (i >= 0) l.splice(i, 1); } toast('Publicação apagada.'); }); }
+      else if (confirm('Denunciar esta publicação como ofensiva, spam ou imprópria?\n\nCom algumas denúncias ela some para todos.')) carrega(async () => { await socApi('/denunciar', { method: 'POST', body: { alvo: id } }); toast('Obrigado. A denúncia foi registrada.'); });
+      break;
+    }
+    case 'perfil': SOC.perfilId = id; SOC.aba = id === (SOC.eu && SOC.eu.id) ? 'eu' : 'perfil'; SOC.perfil = null; irSocial(); break;
+    case 'lista': {
+      const tit = v === 'seguidores' ? 'Seguidores' : 'Seguindo';
+      carrega(async () => {
+        const j = await socApi('/usuarios/' + encodeURIComponent(id) + '/' + v);
+        if (!SOC.perfil || SOC.perfil.usuario.id !== id) { SOC.perfilId = id; SOC.aba = id === SOC.eu.id ? 'eu' : 'perfil'; SOC.perfil = await socApi('/usuarios/' + encodeURIComponent(id)); view = 'social'; }
+        SOC.perfil.lista = { titulo: tit, usuarios: j.usuarios };
+      });
+      break;
+    }
+    case 'seguir': {
+      const segue = v === '1';
+      carrega(async () => {
+        const j = await socApi('/seguir/' + id, { method: segue ? 'DELETE' : 'POST' });
+        for (const l of [SOC.pessoas, SOC.perfil && SOC.perfil.lista && SOC.perfil.lista.usuarios]) if (l) l.forEach(u => { if (u.id === id) u.eu_sigo = j.eu_sigo; });
+        if (SOC.perfil && SOC.perfil.usuario.id === id) { SOC.perfil.usuario.eu_sigo = j.eu_sigo; SOC.perfil.usuario.seguidores += j.eu_sigo ? 1 : -1; }
+        G().cont.seguindo = Math.max(0, (G().cont.seguindo || 0) + (j.eu_sigo ? 1 : -1)); Store.save(state);
+        SOC.feed = null; SOC.rank = null;
+      });
+      break;
+    }
+    case 'bloquear': {
+      const bl = v === '1';
+      if (!bl && !confirm('Bloquear esta pessoa? Vocês deixam de se seguir e você não verá mais as publicações dela.')) break;
+      carrega(async () => { await socApi('/bloquear/' + id, { method: bl ? 'DELETE' : 'POST' }); SOC.perfil = null; SOC.feed = null; toast(bl ? 'Desbloqueado.' : 'Bloqueado.'); });
+      break;
+    }
+    case 'editbio': {
+      const u = SOC.perfil.usuario;
+      const nome = prompt('Seu nome na Comunidade:', u.nome); if (nome == null) break;
+      const bio = prompt('Uma frase sobre você como leitor(a):', u.bio || ''); if (bio == null) break;
+      carrega(async () => { await socApi('/perfil', { method: 'POST', body: { nome, bio } }); SOC.perfil = null; SOC.eu = Object.assign(SOC.eu || {}, { nome }); socGuarda(); });
+      break;
+    }
+    case 'comu': carrega(() => abreComu(id)); view = 'social'; break;
+    case 'comuentra': {
+      const sair = v === '1';
+      carrega(async () => { await socApi('/comunidades/' + id + (sair ? '/sair' : '/entrar'), { method: 'POST' }); await abreComu(id); await carregaMinhas(); SOC.comus = null; SOC.feed = null; if (!sair) toast('Você entrou na comunidade!'); Store.save(state); });
+      break;
+    }
+    case 'retry': SOC.erroEm = 0; SOC.erro = ''; render(); break;
+    case 'rq': SOC.rq[el.dataset.k] = v; render(); break;
+    case 'buscalivro': view = 'library'; render(); setTimeout(() => { const q = $('#libQ') || document.querySelector('#libForm input,[type=search]'); if (q) { q.value = el.dataset.q; const f = q.closest('form'); if (f) f.requestSubmit(); } }, 30); break;
+    case 'sharesel': { const s = HS.sel; if (!s || !R) break; clearSel(); abrirComposer({ tipo: 'frase', texto: s.text, livro: R.b.title, livro_autor: R.b.author || '', gid: R.b.gid || '', pagina: R.idx + 1 }); break; }
+    case 'sharepanel': { const p = HS.panel; if (!p || !R) break; abrirComposer({ tipo: 'frase', texto: p.text, livro: R.b.title, livro_autor: R.b.author || '', gid: R.b.gid || '', pagina: R.idx + 1 }); break; }
+    case 'sharepage': if (R) abrirComposer({ tipo: 'pagina', texto: trechoDaPagina(), livro: R.b.title, livro_autor: R.b.author || '', gid: R.b.gid || '', pagina: R.idx + 1 }); break;
+  }
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { if (COMP.aberto) { COMP.aberto = false; pintaComposer(); } if ($('#cel')) fechaCel(); } });
+
+/* ---------- aba ativa sempre visível na barra (celular) ---------- */
+const _render7 = render;
+render = function () { _render7(); const t = document.querySelector('.tab.on'); if (t && t.parentNode.scrollWidth > t.parentNode.clientWidth) t.parentNode.scrollTo({ left: t.offsetLeft - 40, behavior: 'smooth' }); };
+
+/* ---------- início ---------- */
+aplicaTema();
+const _save7 = Store.save;
+Store.save = function (s) { const r = _save7.call(Store, s); if (!_jogoAndando) agendaJogo(); return r; };
+setTimeout(function inicio7() {
+  if (!window.__booted) return setTimeout(inicio7, 200);
+  aplicaTema(); verificaJogo();
+  const n = notifCfg(); if (n.on) aplicaNotif(false);
+  // tutorial na primeira vez (depois do questionário de gostos)
+  const onbAberto = () => { const o = $('#onb'); return o && !o.hidden; };
+  (function espera() {
+    if (onbAberto() || $('#splash')) return setTimeout(espera, 600);
+    if (!G().tutVisto && state.profile) setTimeout(tutorialInicia, 400);
+  })();
+  if (SOC.token) { socApi('/eu').then(j => { SOC.eu = j.eu; socGuarda(); }).catch(() => {}); socPerfilDepois(true); }
+  else if (SOC.url) setTimeout(async () => { await gStatus(); if (GS.connected) socEntrar(true); }, 2500);
+}, 300);
+setInterval(() => { if (typeof R !== 'undefined' && R) agendaJogo(); }, 60000);
+
 (function () {
   const sp = document.getElementById('splash'); if (!sp) return;
   const t0 = performance.now();
@@ -2817,5 +3722,91 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
   tick();
 })();
 </script>
+<script type="application/json" id="reflexoes">[{"t": "Pense numa opinião forte que você tem. Em que fatos ela se apoia, e quais desses fatos você já conferiu de verdade?", "a": ""}, {"t": "Qual foi a última vez que você mudou de ideia sobre algo importante? O que te convenceu?", "a": ""}, {"t": "Lembre de um personagem de quem você não gosta. Que motivos ele teria para agir como age, do ponto de vista dele?", "a": ""}, {"t": "Se alguém defendesse o oposto do que você pensa sobre um assunto, qual seria o melhor argumento dessa pessoa?", "a": ""}, {"t": "Uma notícia que te deixou indignado(a) esta semana: você leu a fonte original ou só o título?", "a": ""}, {"t": "O que você sabe hoje que, há cinco anos, acharia impossível de entender?", "a": ""}, {"t": "Qual pergunta você evita fazer a si mesmo(a)? Por quê?", "a": ""}, {"t": "Que livro mudou a forma como você vê alguma coisa? O que exatamente mudou?", "a": ""}, {"t": "Diferencie: o que você acredita porque pensou, e o que acredita porque sempre ouviu dizer?", "a": ""}, {"t": "Se você pudesse fazer uma única pergunta a um autor que já morreu, quem seria e o que perguntaria?", "a": ""}, {"t": "Que hábito pequeno, repetido por um ano, mudaria mais a sua vida?", "a": ""}, {"t": "Quando foi a última vez que você disse “não sei” sem medo? Saber que não sabe também é saber.", "a": ""}, {"t": "Uma história é contada de um ponto de vista. Como seria a última coisa que você leu contada por outro personagem?", "a": ""}, {"t": "O que torna um argumento convincente para você: a lógica, a emoção ou quem está falando?", "a": ""}, {"t": "Qual é a diferença entre ter informação e ter conhecimento?", "a": ""}, {"t": "Que ideia você já defendeu e hoje acha errada? O que isso ensina sobre as ideias que você defende agora?", "a": ""}, {"t": "Ler é conversar com alguém que não está aqui. Com quem você conversou hoje?", "a": ""}, {"t": "O que você faria diferente se ninguém nunca soubesse o que você fez?", "a": ""}, {"t": "Pense numa decisão recente. Você escolheu, ou só seguiu o que era mais fácil?", "a": ""}, {"t": "Que palavra você usa sempre sem saber exatamente o que ela significa? Que tal descobrir hoje?", "a": ""}, {"t": "Um bom leitor desconfia até do livro de que gosta. Qual trecho do seu livro atual você questionaria?", "a": ""}, {"t": "Se o mundo inteiro lesse um único livro, qual você escolheria? E qual seria o risco disso?", "a": ""}, {"t": "O que é mais difícil: aprender algo novo ou desaprender algo antigo?", "a": ""}, {"t": "Quando você discorda de alguém, você tenta entender ou tenta vencer?", "a": ""}, {"t": "Que assunto você acha chato? Será que é o assunto, ou o jeito como te apresentaram?", "a": ""}, {"t": "Escreva mentalmente uma frase sobre o seu dia que mereceria estar num livro.", "a": ""}, {"t": "Qual é a sua maior certeza? O que precisaria acontecer para você duvidar dela?", "a": ""}, {"t": "Liberdade é poder fazer qualquer coisa, ou poder escolher o que vale a pena fazer?", "a": ""}, {"t": "Uma pessoa pode ser boa e fazer algo errado? Pense num exemplo de um livro.", "a": ""}, {"t": "O que a sua leitura de hoje tem a ver com a sua vida? Toda história fala de alguém, mesmo que não pareça.", "a": ""}, {"t": "Se você explicasse o que está lendo para uma criança de dez anos, o que diria?", "a": ""}, {"t": "O que é justiça para você? E para o personagem do livro que está lendo?", "a": ""}, {"t": "Que voz falta na história que você está lendo? Quem não tem chance de falar?", "a": ""}, {"t": "Você lê para fugir do mundo ou para entendê-lo melhor? Os dois valem.", "a": ""}, {"t": "Que pergunta este dia deixou sem resposta?", "a": ""}, {"t": "Ser curioso é admitir que existe muito que não se sabe. O que você quer descobrir esta semana?", "a": ""}, {"t": "A primeira impressão sobre alguém costuma estar certa? Lembre de um personagem que te enganou.", "a": ""}, {"t": "Se você pudesse viver dentro de um livro por um dia, qual seria e o que faria?", "a": ""}, {"t": "Qual é a diferença entre uma opinião e um fato? Encontre um exemplo no que você leu hoje.", "a": ""}, {"t": "Por que algumas histórias de séculos atrás ainda falam com a gente hoje?", "a": ""}, {"t": "Conhece-te a ti mesmo.", "a": "Inscrição do templo de Apolo em Delfos"}, {"t": "Uma vida sem reflexão não vale a pena ser vivida.", "a": "Sócrates, segundo Platão"}, {"t": "Ninguém se banha duas vezes no mesmo rio.", "a": "Heráclito"}, {"t": "Penso, logo existo.", "a": "René Descartes"}, {"t": "O coração tem razões que a própria razão desconhece.", "a": "Blaise Pascal"}, {"t": "Não são as coisas que perturbam os homens, mas as opiniões que eles têm sobre elas.", "a": "Epicteto"}, {"t": "Não é porque as coisas são difíceis que não ousamos; é porque não ousamos que elas são difíceis.", "a": "Sêneca"}, {"t": "Enquanto adiamos, a vida passa.", "a": "Sêneca"}, {"t": "Ousa saber!", "a": "Horácio (lema adotado por Kant)"}, {"t": "Há mais coisas entre o céu e a terra, Horácio, do que sonha a tua filosofia.", "a": "William Shakespeare, Hamlet"}, {"t": "Não existe nada bom ou mau, mas o pensamento o faz assim.", "a": "William Shakespeare, Hamlet"}, {"t": "Quem tem um porquê para viver suporta quase qualquer como.", "a": "Friedrich Nietzsche"}, {"t": "Ao vencido, ódio ou compaixão; ao vencedor, as batatas.", "a": "Machado de Assis, Quincas Borba"}, {"t": "Mudam-se os tempos, mudam-se as vontades.", "a": "Luís de Camões"}, {"t": "Tudo vale a pena se a alma não é pequena.", "a": "Fernando Pessoa, Mensagem"}, {"t": "Ler é sonhar pela mão de outrem.", "a": "Fernando Pessoa, Livro do Desassossego"}, {"t": "Um país se faz com homens e livros.", "a": "Monteiro Lobato"}, {"t": "Todas as famílias felizes se parecem; cada família infeliz é infeliz à sua maneira.", "a": "Liev Tolstói, Anna Kariênina"}, {"t": "O essencial é invisível aos olhos.", "a": "Antoine de Saint-Exupéry, O Pequeno Príncipe"}, {"t": "Navegar é preciso; viver não é preciso.", "a": "Frase dos navegantes antigos, retomada por Fernando Pessoa"}]</script>
+<style>
+/* ---- parte 7: jogo, tutorial, comunidade ---- */
+@media(max-width:760px){.bar{flex-wrap:nowrap;gap:.5rem}nav{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch;min-width:0}nav::-webkit-scrollbar{display:none}.tab{flex:none;padding:.45rem .75rem}.brand{font-size:1.3rem}}
+.post,.card.jogo{content-visibility:auto;contain-intrinsic-size:auto 260px}
+.jogo{background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 12%,var(--card)),var(--card) 60%)}
+.jtop{display:flex;align-items:center;gap:.8rem}
+.jlvl{width:54px;height:54px;flex:none;border-radius:16px;background:linear-gradient(135deg,var(--accent),var(--warn));display:grid;place-items:center;color:#fff;font:800 1.5rem Georgia,serif;box-shadow:0 6px 16px -6px var(--accent)}
+.xpbar,.mbar{height:8px;border-radius:9px;background:var(--track);overflow:hidden;margin:.3rem 0 .15rem}
+.xpbar i,.mbar i{display:block;height:100%;border-radius:9px;background:linear-gradient(90deg,var(--accent),var(--warn));transition:width .6s var(--ease,ease)}
+.mbar{height:5px;margin:.25rem 0 0}
+.jstreak{border:1px solid var(--line);background:var(--card);border-radius:14px;padding:.35rem .6rem;font-size:1.2rem;cursor:pointer;color:var(--ink)}
+.jstreak b{font-size:1.1rem;margin-left:.15rem}
+.jmiss{margin-top:.9rem;border-top:1px dashed var(--line);padding-top:.7rem}
+.jmh{display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;flex-wrap:wrap;margin-bottom:.3rem}
+.jm{display:flex;align-items:center;gap:.6rem;padding:.4rem 0;font-size:.93rem}
+.jm.ok{opacity:.65}.jm.ok>div>div:first-child{text-decoration:line-through}
+.jme{width:1.6rem;text-align:center;font-size:1.15rem}
+.jxp{color:var(--accent);font-weight:700}
+.jfoot{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.6rem}
+.refl p{font:italic 1.08rem/1.5 Georgia,serif;margin:.35rem 0}
+.cqgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.6rem}
+.cq{border:1px solid var(--line);border-radius:14px;padding:.7rem;display:flex;flex-direction:column;gap:.15rem;opacity:.7}
+.cq.ok{opacity:1;background:color-mix(in srgb,var(--accent) 8%,var(--card));border-color:color-mix(in srgb,var(--accent) 35%,var(--line))}
+.cqe{font-size:1.8rem}.cq b{font-size:.92rem}.cq small{font-size:.75rem;color:var(--muted)}.cqd{color:var(--accent)!important}
+.cel{position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.55);display:grid;place-items:center;padding:1rem;animation:fadein .25s}
+.celbox{background:var(--card);border-radius:22px;padding:1.6rem 1.4rem;text-align:center;max-width:340px;width:100%;box-shadow:0 30px 60px -20px rgba(0,0,0,.6);animation:pop .45s cubic-bezier(.2,1.4,.4,1)}
+.celbox small{text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-size:.72rem}
+.cele{font-size:4.2rem;line-height:1.2;margin:.4rem 0;animation:bounce 1.2s .3s ease-in-out}
+.celxp{display:inline-block;margin:.2rem 0 .9rem;padding:.25rem .8rem;border-radius:999px;background:linear-gradient(90deg,var(--accent),var(--warn));color:#fff}
+.celconf{position:absolute;inset:0;overflow:hidden;pointer-events:none}
+.celconf i{position:absolute;top:-12px;width:9px;height:14px;border-radius:2px;animation:conf 1.8s ease-in forwards;transform:rotate(var(--r))}
+@keyframes conf{to{transform:translateY(105vh) rotate(calc(var(--r) + 540deg));opacity:.3}}
+@keyframes pop{from{transform:scale(.6);opacity:0}to{transform:none;opacity:1}}
+@keyframes bounce{0%,100%{transform:none}30%{transform:translateY(-14px) scale(1.1)}60%{transform:translateY(2px)}}
+@keyframes fadein{from{opacity:0}}
+#tut{position:fixed;inset:0;z-index:90}
+.tutspot{position:fixed;border-radius:14px;box-shadow:0 0 0 9999px rgba(0,0,0,.62);transition:all .3s var(--ease,ease);pointer-events:none}
+.tutspot.meio{left:50%;top:50%;width:0;height:0}
+.tutbox{position:fixed;background:var(--card);color:var(--ink);border-radius:18px;padding:1rem 1.1rem;max-width:340px;width:calc(100% - 16px);box-shadow:0 20px 50px -15px rgba(0,0,0,.6);animation:pop .3s}
+.tutbox.meio{left:50%;top:50%;transform:translate(-50%,-50%);animation:none}
+.tutbox h3{margin:.2rem 0 .3rem}.tutbox p{margin:0 0 .8rem}
+.stabs,.rsel{display:flex;gap:.4rem;overflow-x:auto;scrollbar-width:none;padding:.1rem 0 .7rem}
+.rsel{padding:.3rem 0 0;flex-wrap:wrap}
+.stabs .chip,.rsel .chip{flex:none}
+.chip.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.av{width:38px;height:38px;border-radius:50%;object-fit:cover;flex:none;display:inline-grid;place-items:center;font-weight:700;color:#fff;background:hsl(var(--h,20) 45% 48%)}
+.av.sm{width:28px;height:28px;font-size:.8rem}.av.lg{width:76px;height:76px;font-size:1.8rem}
+.spost .sph{display:flex;gap:.6rem;align-items:center;padding:.8rem .9rem 0}
+.spn,.spc,.lnk{background:none;border:0;padding:0;font:inherit;color:var(--ink);font-weight:700;cursor:pointer}
+.spc,.lnk{font-weight:600;color:var(--accent)}.lnk{font-size:.85rem}
+.lv{font-size:.7rem;background:var(--track);border-radius:6px;padding:.05rem .35rem;color:var(--muted)}
+.spm{background:none;border:0;font-size:1.3rem;color:var(--muted);cursor:pointer;padding:.2rem .4rem}
+.spt{white-space:pre-wrap;margin:.2rem 0}
+.spq{margin:.3rem 0;padding:.2rem 0 .2rem .9rem;border-left:3px solid var(--accent);font:italic 1.05rem/1.55 Georgia,serif;white-space:pre-wrap}
+.splv{display:inline-block;margin-top:.5rem;border:1px solid var(--line);background:var(--bg);border-radius:10px;padding:.3rem .6rem;font:inherit;font-size:.85rem;color:var(--ink);cursor:pointer}
+.spst{color:var(--warn);letter-spacing:.1em}
+.spa{display:flex;gap:.3rem;padding:0 .6rem .6rem}
+.spa button{background:none;border:0;border-radius:10px;padding:.35rem .6rem;font:inherit;color:var(--muted);cursor:pointer}
+.spa button:hover,.spa button.on{background:var(--track);color:var(--ink)}
+.spcm{border-top:1px solid var(--line);padding:.6rem .9rem .8rem;display:flex;flex-direction:column;gap:.5rem}
+.cmi{display:flex;gap:.5rem;font-size:.92rem}
+.cmf{display:flex;gap:.4rem}.cmf input{flex:1;min-width:0}
+.scomp{display:flex;align-items:center;gap:.7rem;width:100%;text-align:left;cursor:pointer;font:inherit;color:inherit}
+.smodal{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;justify-content:center;animation:fadein .2s}
+.smbox{background:var(--card);width:100%;max-width:560px;border-radius:20px 20px 0 0;padding:1rem;display:flex;flex-direction:column;gap:.6rem;max-height:92vh;overflow:auto}
+@media(min-width:700px){.smodal{align-items:center}.smbox{border-radius:20px}}
+.smbox textarea,.smbox select,.ncomu input,.ncomu textarea{width:100%}
+.ctipos{display:flex;gap:.35rem;flex-wrap:wrap}
+.rk{display:flex;align-items:center;gap:.6rem;width:100%;border:0;background:none;padding:.5rem .3rem;border-bottom:1px solid var(--line);font:inherit;color:inherit;cursor:pointer;text-align:left}
+.rk.eu{background:color-mix(in srgb,var(--accent) 12%,transparent);border-radius:10px}
+.rkp{width:2rem;text-align:center;font-weight:700}.rkn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rksep{text-align:center;color:var(--muted)}
+.pess{display:flex;align-items:center;gap:.6rem;padding:.5rem 0;border-bottom:1px solid var(--line)}
+.pessn{flex:1;min-width:0;background:none;border:0;text-align:left;font:inherit;color:inherit;cursor:pointer;display:flex;flex-direction:column}
+.comuc{display:flex;gap:.7rem;align-items:flex-start;width:100%;text-align:left;border:1px solid var(--line);background:var(--bg);border-radius:14px;padding:.7rem;margin:.4rem 0;font:inherit;color:inherit;cursor:pointer}
+.comuc small{display:block}
+.comue{font-size:1.8rem;width:2.4rem;text-align:center}.comue.big{font-size:2.6rem}
+.comut{display:flex;align-items:center;gap:.7rem;margin-top:.5rem}
+.perf{display:flex;gap:1rem;align-items:flex-start}
+.pstats{display:flex;gap:1rem;flex-wrap:wrap;margin:.6rem 0}
+.pstats span,.pstats button{display:flex;flex-direction:column;font-size:.75rem;color:var(--muted);background:none;border:0;padding:0;font-family:inherit;cursor:default;text-align:left}
+.pstats button{cursor:pointer}.pstats b{font-size:1.05rem;color:var(--ink)}
+.socin{padding:2rem 1.2rem}
+.tgl{display:flex;align-items:center;gap:.5rem;font-weight:600}
+</style>
 </body>
 </html>

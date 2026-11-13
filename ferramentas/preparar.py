@@ -11,6 +11,7 @@ Variáveis de ambiente (todas opcionais; na publicação vêm dos segredos do Gi
   ATUALIZA_REPO   "usuario/repositorio" do GitHub (aviso de versão nova e atualização em um clique)
   IA_PROXY_URL    endereço do intermediário de IA (o mesmo do Investe.AI)
   IA_PROXY_TOKEN  a senha APP_TOKEN do intermediário
+  SOCIAL_URL      endereço do servidor social (Comunidade); o GitHub Actions publica e preenche sozinho
   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET   cliente OAuth do Google, tipo "App para computador" (pode ser o mesmo do Investe.AI)
 """
 import json, os, re, shutil, sys
@@ -26,9 +27,10 @@ cfg = {
     "iaProxyToken": env("IA_PROXY_TOKEN"),
     "googleClientId": env("GOOGLE_CLIENT_ID"),
     "googleClientSecret": env("GOOGLE_CLIENT_SECRET"),
+    "socialUrl": env("SOCIAL_URL").rstrip("/"),
 }
 nomes = {"versao": "APP_VERSAO", "repo": "ATUALIZA_REPO", "iaProxyUrl": "IA_PROXY_URL", "iaProxyToken": "IA_PROXY_TOKEN",
-         "googleClientId": "G_CLIENT_ID", "googleClientSecret": "G_CLIENT_SECRET"}
+         "googleClientId": "G_CLIENT_ID", "googleClientSecret": "G_CLIENT_SECRET", "socialUrl": "SOCIAL_URL"}
 
 for chave, nome in nomes.items():
     m = re.search(rf"^\${nome} = '((?:[^']|'')*)'$", src, re.M)
@@ -43,6 +45,11 @@ if cfg["iaProxyUrl"] and not re.match(r"https?://", cfg["iaProxyUrl"]):
     cfg["iaProxyUrl"] = "https://" + cfg["iaProxyUrl"]
     m = re.search(r"^\$IA_PROXY_URL = '.*'$", src, re.M)
     src = src[:m.start()] + "$IA_PROXY_URL = '" + cfg["iaProxyUrl"].replace("'", "''") + "'" + src[m.end():]
+if cfg["socialUrl"] and not re.match(r"https?://", cfg["socialUrl"]):
+    cfg["socialUrl"] = "https://" + cfg["socialUrl"]
+    m = re.search(r"^\$SOCIAL_URL = '.*'$", src, re.M)
+    src = src[:m.start()] + "$SOCIAL_URL = '" + cfg["socialUrl"].replace("'", "''") + "'" + src[m.end():]
+if not cfg["socialUrl"]: print("AVISO: sem SOCIAL_URL: a aba Comunidade fica desativada.")
 if not cfg["iaProxyUrl"]: print("AVISO: sem IA_PROXY_URL: a IA só funciona se a pessoa colocar a própria chave em Ajustes.")
 if not (cfg["googleClientId"] and cfg["googleClientSecret"]): print("AVISO: sem GOOGLE_CLIENT_ID/SECRET: o login com Google fica desativado.")
 
@@ -62,6 +69,11 @@ with open(os.path.join(assets, "index.html"), "w", encoding="utf-8", newline="\n
 with open(os.path.join(assets, "config.json"), "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False)
 shutil.copyfile(os.path.join(RAIZ, "icone.png"), os.path.join(assets, "icone.png"))
+mr = re.search(r'<script type="application/json" id="reflexoes">(.*?)</script>', html, re.S)
+if not mr: sys.exit("faltou a lista de reflexões no Paginas.bat")
+json.loads(mr.group(1))
+with open(os.path.join(assets, "reflexoes.json"), "w", encoding="utf-8") as f:
+    f.write(mr.group(1))
 
 print("ok: build/Paginas.bat e assets do Android, versão", cfg["versao"],
       "| IA:", "intermediário" if cfg["iaProxyUrl"] else "sem", "| Google:", "sim" if cfg["googleClientId"] else "não")

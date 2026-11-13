@@ -42,6 +42,23 @@ Pode reaproveitar a mesma chave do Investe.AI (nesse caso o apelido é `investe-
 `keytool -genkeypair -v -keystore paginas.keystore -alias paginas -keyalg RSA -keysize 2048 -validity 10000`
 e convertê-la no PowerShell com `[Convert]::ToBase64String([IO.File]::ReadAllBytes("paginas.keystore")) | Set-Clipboard`. **Guarde o arquivo**: sem ele não dá para publicar atualizações que instalem por cima.
 
+## 1b. Comunidade (amigos, posts, rankings e comunidades)
+
+A Comunidade precisa de um servidor na internet. Ele fica na **Cloudflare** (grátis, a mesma conta do intermediário de IA) e o GitHub publica e atualiza tudo sozinho: o programa, o banco de dados e o endereço que vai dentro do app. Você só cria 2 segredos:
+
+1. Entre em **https://dash.cloudflare.com/profile/api-tokens** > **Create Token** > no modelo **Edit Cloudflare Workers** clique em **Use template**.
+2. Em **Permissions**, clique em **+ Add more** e adicione: **Account** > **D1** > **Edit**.
+3. Em **Account Resources**, escolha a sua conta. Clique em **Continue to summary** > **Create Token** e copie o token (ele só aparece uma vez).
+4. Pegue o **Account ID**: em **https://dash.cloudflare.com**, abra **Workers e Pages**; o ID aparece na coluna da direita (ou na barra de endereço, logo depois de `dash.cloudflare.com/`).
+5. No repositório, crie os segredos:
+
+| Segredo | O que colar |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | o token do passo 3 |
+| `CLOUDFLARE_ACCOUNT_ID` | o Account ID do passo 4 |
+
+Na próxima publicação, o GitHub cria o banco `paginas-social`, publica o servidor `paginas-social` e coloca o endereço dele no app. Os rankings usam só o tempo lido no leitor, contado pelo relógio do servidor a cada minuto (no máximo 8 h por dia), e a cidade, o estado e o país vêm da conexão de internet, não do que a pessoa digita.
+
 ## 2. Ligar o site
 
 **Settings > Pages**: em "Source" escolha **Deploy from a branch**, branch **main**, pasta **/docs**, e salve. Em um ou dois minutos o site fica em:
@@ -81,4 +98,5 @@ https://github.com/LimaBat/Paginas/releases/latest/download/Paginas.apk
 | `ferramentas/icone.py` | Desenha os ícones (o mesmo desenho do programa) |
 | `ferramentas/testar_android.sh` | Teste do APK no emulador |
 | `.github/workflows/publicar.yml` | Gera, testa e publica o `.bat` e o `.apk` a cada release |
+| `servidor-social/` | O servidor da Comunidade (Cloudflare Worker + banco D1) e o teste dele |
 | `docs/` | O site de download, a Política de Privacidade e os Termos |
