@@ -1043,6 +1043,7 @@ function deleteLog(id) {
     if (b.status === 'finished' && b.currentPage < b.totalPages) { b.status = 'reading'; b.finishedAt = null; }
   }
   state.logs = state.logs.filter(x => x.id !== id);
+  apagado(id);
   commit();
 }
 function startBook(id) { const b = state.books.find(x => x.id === id); if (b) { b.status = 'reading'; commit(); } }
@@ -1054,8 +1055,10 @@ function finishBook(id) {
 function deleteBook(id) {
   const b = state.books.find(x => x.id === id); if (!b) return;
   if (!confirm(`Excluir "${b.title}" e o histórico de leitura dele?`)) return;
+  state.logs.filter(l => l.bookId === id).forEach(l => apagado(l.id));
   state.books = state.books.filter(x => x.id !== id);
   state.logs = state.logs.filter(l => l.bookId !== id);
+  apagado(id);
   commit();
 }
 
@@ -1766,7 +1769,7 @@ function flushReading(final) {
   return true;
 }
 function closeReader(skipRender) {
-  if (R) flushReading(true);
+  if (R) { flushReading(true); setTimeout(() => { if (window.Sync && GS.connected) Sync.push(); }, 600); }
   const met = R ? R.wasMet : true;
   R = null;
   const el = $('#reader'); el.hidden = true; el.innerHTML = '';
@@ -2707,21 +2710,83 @@ async function gStatus() {
   try { Object.assign(GS, await (await api('/api/google/status')).json(), { loaded: true }); } catch (e) {}
 }
 function quietSave() { Sync.quiet = true; try { Store.save(state); } finally { Sync.quiet = false; } }
-function adoptCloud(c) {
-  const d = defaults();
-  state = Object.assign({}, d, c, { settings: Object.assign({}, d.settings, c.settings || {}), rests: Array.isArray(c.rests) ? c.rests : [] });
-  state.syncMod = state.mod || 0;
-  quietSave(); _map = null; render();
+/* ---------- sincronização: JUNTA os dados dos aparelhos (nunca descarta leituras de um deles) ---------- */
+const RANK_ST = { want: 0, reading: 1, finished: 2 };
+function apagado(id) { if (!state.del) state.del = {}; state.del[id] = Date.now(); }
+function mesclar(a, c) {
+  const d = defaults(), out = Object.assign({}, d, a);
+  const del = Object.assign({}, c.del || {}, a.del || {});
+  const limite = Date.now() - 180 * 86400000;
+  for (const k in del) if (del[k] < limite) delete del[k];
+  out.del = del;
+  // registros de leitura: união
+  const logs = new Map();
+  for (const l of (c.logs || []).concat(a.logs || [])) if (l && !del[l.id]) logs.set(l.id || (l.ts + '|' + l.bookId), l);
+  out.logs = [...logs.values()].sort((x, y) => (x.ts || 0) - (y.ts || 0));
+  // livros: o mais recente como base, juntando progresso, grifos e anotações
+  const cb = new Map((c.books || []).map(b => [b.id, b]));
+  const livros = [];
+  const junta = (x, y) => {
+    const novo = (y.lastRead || 0) > (x.lastRead || 0) ? y : x, velho = novo === x ? y : x;
+    const r = Object.assign({}, velho, novo);
+    r.currentPage = Math.max(x.currentPage || 0, y.currentPage || 0);
+    r.lastRead = Math.max(x.lastRead || 0, y.lastRead || 0) || undefined;
+    if ((RANK_ST[velho.status] || 0) > (RANK_ST[novo.status] || 0)) { r.status = velho.status; r.finishedAt = velho.finishedAt; }
+    r.finishedAt = r.finishedAt || x.finishedAt || y.finishedAt || null;
+    for (const k of ['rating', 'review', 'note']) if (!r[k] && (x[k] || y[k])) r[k] = x[k] || y[k];
+    const hl = new Map();
+    for (const h of (velho.hl || []).concat(novo.hl || [])) if (h && !del[h.id]) hl.set(h.id, Object.assign({}, hl.get(h.id) || {}, h));
+    if (hl.size || r.hl) r.hl = [...hl.values()].sort((p, q) => (p.ts || 0) - (q.ts || 0));
+    return r;
+  };
+  for (const b of a.books || []) { if (del[b.id]) continue; const o = cb.get(b.id); livros.push(o ? junta(b, o) : b); cb.delete(b.id); }
+  for (const b of cb.values()) if (!del[b.id]) livros.push(b);
+  out.books = livros;
+  out.rests = [...new Set([...(a.rests || []), ...(c.rests || [])])].sort();
+  // ajustes e perfil: os do aparelho que mudou por último
+  const cNovo = (c.mod || 0) > (a.mod || 0);
+  for (const k of ['settings', 'profile', 'prefs']) if (cNovo && c[k]) out[k] = c[k];
+  out.settings = Object.assign({}, d.settings, out.settings || {});
+  // jogo: conquistas, missões e contadores somados sem perder nada
+  const ga = a.game || {}, gc = c.game || {}, g = Object.assign({}, gc, ga);
+  g.conq = Object.assign({}, gc.conq || {}, ga.conq || {});
+  for (const k in gc.conq || {}) if (ga.conq && ga.conq[k]) g.conq[k] = Math.min(ga.conq[k], gc.conq[k]);
+  g.cont = Object.assign({}, gc.cont || {}); for (const k in ga.cont || {}) g.cont[k] = Math.max(ga.cont[k] || 0, g.cont[k] || 0);
+  g.miss = Object.assign({}, gc.miss || {}); for (const k in ga.miss || {}) g.miss[k] = [...new Set([...(g.miss[k] || []), ...ga.miss[k]])];
+  g.bau = Object.assign({}, gc.bau || {}, ga.bau || {});
+  if (ga.dia && gc.dia && ga.dia.d === gc.dia.d) { g.dia = Object.assign({}, ga.dia); for (const k in gc.dia) if (k !== 'd') g.dia[k] = Math.max(ga.dia[k] || 0, gc.dia[k] || 0); }
+  g.tutVisto = ga.tutVisto || gc.tutVisto; g.iniciado = ga.iniciado || gc.iniciado;
+  g.nivel = Math.max(ga.nivel || 0, gc.nivel || 0) || undefined;
+  out.game = g;
+  out.mod = Math.max(a.mod || 0, c.mod || 0);
+  return out;
+}
+const marca = s => JSON.stringify([(s.books || []).map(b => [b.id, b.status, b.currentPage, b.rp, b.lastRead || 0, (b.hl || []).length, b.rating || 0]),
+  (s.logs || []).map(l => l.id).sort(), (s.rests || []).slice().sort(), Object.keys(s.del || {}).sort(), s.settings, s.profile,
+  s.game ? [Object.keys(s.game.conq || {}).sort(), JSON.stringify(s.game.cont || {}), Object.keys(s.game.miss || {}).length] : 0]);
+function adotar(m) {
+  const leitor = typeof R !== 'undefined' && R;
+  // com um livro aberto, o leitor continua usando o mesmo livro (só recebe os grifos juntados)
+  if (leitor) { const i = m.books.findIndex(b => b.id === R.b.id); if (i >= 0) { const hl = m.books[i].hl; m.books[i] = R.b; if (hl) R.b.hl = hl; } }
+  state = m; _map = null;
+  quietSave();
+  if (!leitor) render();
 }
 window.Sync = {
-  quiet: false, t: null,
-  later() { if (!GS.connected || loadFailed) return; clearTimeout(this.t); this.t = setTimeout(() => Sync.push(), 20000); },
+  quiet: false, t: null, ult: 0,
+  later() { if (!GS.connected || loadFailed) return; clearTimeout(this.t); this.t = setTimeout(() => Sync.push(), 8000); },
   async push() {
     clearTimeout(this.t);
     if (!GS.connected || GS.busy || loadFailed) return false;
     GS.busy = true;
     try {
-      state.syncMod = state.mod || 0;
+      // antes de enviar, junta com o que outro aparelho mandou (assim ninguém apaga as leituras do outro)
+      let c = null;
+      try { const r = await api('/api/google/pull'); const t = r.status === 204 ? '' : await r.text(); if (t) c = JSON.parse(t); } catch (e) {}
+      if (c && Array.isArray(c.books)) {
+        const m = mesclar(state, c);
+        if (marca(m) !== marca(state)) adotar(m);
+      }
       quietSave();
       await flushSave();
       await api('/api/google/push', { method: 'POST' });
@@ -2732,8 +2797,7 @@ window.Sync = {
   },
   async pull(manual) {
     if (!GS.connected || GS.busy || loadFailed) return;
-    if (typeof R !== 'undefined' && R) { if (manual) toast('Feche o livro antes de sincronizar.'); return; }
-    GS.busy = true;
+    GS.busy = true; this.ult = Date.now();
     let c = null, msg = '', enviar = false;
     try {
       const r = await api('/api/google/pull');
@@ -2741,24 +2805,28 @@ window.Sync = {
       if (txt) { try { c = JSON.parse(txt); } catch (e) {} }
       if (!c || !Array.isArray(c.books)) enviar = true;
       else {
-        const cm = c.mod || 0, base = state.syncMod || 0, lm = state.mod || 0;
-        const vazio = !state.books.length && !state.logs.length;
-        if (cm === lm) { msg = 'Tudo em dia: este aparelho e a sua conta Google têm os mesmos dados.'; if (state.syncMod !== lm) { state.syncMod = lm; quietSave(); } }
-        else if (cm > base) {
-          if (vazio || lm <= base || confirm('Há mudanças neste aparelho e também na sua conta Google (feitas em outro aparelho).\n\nOK: usar os dados da conta Google.\nCancelar: manter os deste aparelho e enviar para a conta.')) {
-            adoptCloud(c); msg = 'Seus dados foram trazidos da conta Google.';
-          } else enviar = true;
-        } else enviar = true;
+        const m = mesclar(state, c);
+        const mudouAqui = marca(m) !== marca(state), mudouLa = marca(m) !== marca(c);
+        if (mudouAqui) {
+          const novos = m.logs.length - state.logs.length;
+          adotar(m);
+          msg = novos > 0 ? `Trouxe ${novos} ${novos === 1 ? 'leitura' : 'leituras'} do seu outro aparelho.` : 'Seus dados foram atualizados com os do outro aparelho.';
+        }
+        if (mudouLa) enviar = true;
+        if (!mudouAqui && !mudouLa) msg = manual ? 'Tudo em dia: este aparelho e a sua conta Google têm os mesmos dados.' : '';
       }
       GS.err = '';
-    } catch (e) { GS.err = e.message; msg = 'Não consegui sincronizar: ' + e.message; }
+    } catch (e) { GS.err = e.message; if (manual) msg = 'Não consegui sincronizar: ' + e.message; }
     finally { GS.busy = false; }
-    if (enviar) { const ok = await Sync.push(); msg = ok ? 'Dados deste aparelho guardados na sua conta Google.' : 'Não consegui sincronizar: ' + GS.err; }
-    else GS.last = GS.err ? GS.last : Date.now();
-    if (msg && (manual || /trazidos/.test(msg))) toast(msg);
+    if (enviar) { const ok = await Sync.push(); if (manual && !msg) msg = ok ? 'Dados deste aparelho guardados na sua conta Google.' : 'Não consegui sincronizar: ' + GS.err; }
+    if (!GS.err) GS.last = Date.now();
+    if (msg && (manual || /Trouxe|atualizados/.test(msg))) toast(msg);
     if (view === 'settings') render();
   }
 };
+// confere a nuvem sempre que o app volta para a tela e a cada 2 minutos (o outro aparelho pode ter lido)
+setInterval(() => { if (GS.connected && document.visibilityState === 'visible' && Date.now() - Sync.ult > 110000) Sync.pull(false); }, 30000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && GS.connected && Date.now() - Sync.ult > 15000) Sync.pull(false); });
 function gConectado() { clearInterval(GS.poll); toast('Conta Google conectada.'); render(); Sync.pull(false); }
 async function googleConnect() {
   if (!GS.available) return toast('O login com Google não está ativado nesta cópia do programa.');
@@ -2911,7 +2979,7 @@ document.addEventListener('click', e => {
     }
     case 'hldel': {
       const p = HS.panel; if (!p || !p.hid || !R) break;
-      R.b.hl = hls().filter(h => h.id !== p.hid); Store.save(state);
+      R.b.hl = hls().filter(h => h.id !== p.hid); apagado(p.hid); Store.save(state);
       HS.panel = null; repaintPage(); paintPanel();
       break;
     }
