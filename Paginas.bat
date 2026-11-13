@@ -22,8 +22,8 @@ $SOCIAL_URL = $SOCIAL_URL.TrimEnd('/')
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $dir = Join-Path $env:LOCALAPPDATA 'Paginas'
-$EXE = [string]$env:PAGINAS_EXE   # caminho do Paginas.exe quando o programa foi aberto por ele
-if ($EXE -and -not (Test-Path -LiteralPath $EXE)) { $EXE = '' }
+$PGEXE = [string]$env:PAGINAS_EXE   # caminho do Paginas.exe quando o programa foi aberto por ele
+if ($PGEXE -and -not (Test-Path -LiteralPath $PGEXE)) { $PGEXE = '' }
 try {
   [void](New-Item -ItemType Directory -Force -Path $dir)
   $booksDir = Join-Path $dir 'livros'
@@ -126,7 +126,7 @@ try {
   $flagTxt = ''
   try { if (Test-Path -LiteralPath $flag) { $flagTxt = [IO.File]::ReadAllText($flag).Trim() } } catch { }
   $marca = $APP_VERSAO
-  if ($EXE) { $marca = $APP_VERSAO + '|exe' }
+  if ($PGEXE) { $marca = $APP_VERSAO + '|exe' }
   $versaoNova = $flagTxt -ne $marca   # primeira vez, versao nova ou troca de .bat para .exe: refaz o icone e os atalhos
   try {
     if ($versaoNova -or -not (Test-Path -LiteralPath $icoFile)) { Save-Ico $icoFile }
@@ -148,7 +148,7 @@ $f=[IO.File]::ReadAllText($env:PAGINAS_SELF,[Text.Encoding]::UTF8).Replace([stri
 '@
     $vb = 'Set sh = CreateObject("WScript.Shell")' + "`r`n" + 'sh.Environment("Process")("PAGINAS_SELF") = "' + $appBat + '"' + "`r`n" + 'sh.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command ""' + $psCmd.Trim() + '""", 0, False' + "`r`n"
     $vbsFile = Join-Path $dir 'abrir.vbs'
-    if ($EXE) { if (Test-Path -LiteralPath $vbsFile) { Remove-Item -LiteralPath $vbsFile -Force } }
+    if ($PGEXE) { if (Test-Path -LiteralPath $vbsFile) { Remove-Item -LiteralPath $vbsFile -Force } }
     else { [IO.File]::WriteAllText($vbsFile, $vb, [Text.Encoding]::Unicode) }
     if ($versaoNova) {
       $wsh = New-Object -ComObject WScript.Shell
@@ -159,10 +159,10 @@ $f=[IO.File]::ReadAllText($env:PAGINAS_SELF,[Text.Encoding]::UTF8).Replace([stri
           # na Area de Trabalho: cria na primeira vez; depois so atualiza o atalho que ainda existe (respeita quem apagou)
           if ($folder -eq $desk -and $flagTxt -and -not (Test-Path -LiteralPath $lnkPath)) { continue }
           $lnk = $wsh.CreateShortcut($lnkPath)
-          if ($EXE) {
-            $lnk.TargetPath = $EXE
+          if ($PGEXE) {
+            $lnk.TargetPath = $PGEXE
             $lnk.Arguments = ''
-            $lnk.IconLocation = $EXE + ',0'
+            $lnk.IconLocation = $PGEXE + ',0'
           } else {
             $lnk.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
             $lnk.Arguments = '"' + $vbsFile + '"'
@@ -447,7 +447,7 @@ try {
       $ps1 = Join-Path $dir 'notificar.ps1'
       $vbsN = Join-Path $dir 'notificar.vbs'
       [IO.File]::WriteAllText($ps1, $NOTIF_PS1, (New-Object System.Text.UTF8Encoding($true)))
-      if ($EXE) { if (Test-Path -LiteralPath $vbsN) { Remove-Item -LiteralPath $vbsN -Force } }
+      if ($PGEXE) { if (Test-Path -LiteralPath $vbsN) { Remove-Item -LiteralPath $vbsN -Force } }
       else {
         $vbsTxt = 'CreateObject("WScript.Shell").Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""' + $ps1 + '""", 0, False' + "`r`n"
         [IO.File]::WriteAllText($vbsN, $vbsTxt, [Text.Encoding]::Unicode)
@@ -457,7 +457,7 @@ try {
         $gat = @()
         foreach ($h in @($in.horas)) { if ([string]$h -match '^\d{1,2}:\d{2}$') { $gat += New-ScheduledTaskTrigger -Daily -At ([datetime]::ParseExact([string]$h, 'H:mm', $null)) } }
         if (-not $gat.Count) { $gat += New-ScheduledTaskTrigger -Daily -At ([datetime]::ParseExact('09:00', 'H:mm', $null)) }
-        if ($EXE) { $acao = New-ScheduledTaskAction -Execute $EXE -Argument '--reflexao' }
+        if ($PGEXE) { $acao = New-ScheduledTaskAction -Execute $PGEXE -Argument '--reflexao' }
         else { $acao = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\wscript.exe') -Argument ('"' + $vbsN + '"') }
         $cfgT = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
         [void](Register-ScheduledTask -TaskName $nomeTarefa -Action $acao -Trigger $gat -Settings $cfgT -Description 'Reflexoes do Paginas' -Force)
@@ -467,7 +467,7 @@ try {
     elseif ($path -eq '/api/notif/teste' -and $req.HttpMethod -eq 'POST') {
       $ps1 = Join-Path $dir 'notificar.ps1'
       [IO.File]::WriteAllText($ps1, $NOTIF_PS1, (New-Object System.Text.UTF8Encoding($true)))
-      if ($EXE) { [void](Start-Process -FilePath $EXE -ArgumentList '--reflexao') }
+      if ($PGEXE) { [void](Start-Process -FilePath $PGEXE -ArgumentList '--reflexao') }
       else { [void](Start-Process powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ('"' + $ps1 + '"') -WindowStyle Hidden) }
       Send-Json $ctx 200 '{"ok":true}'
     }
@@ -693,7 +693,7 @@ try {
   if ($null -ne $S.restart) {
     try {
       $vbsNovo = Join-Path $dir 'abrir.vbs'
-      if ($EXE) { [void](Start-Process -FilePath $EXE) }
+      if ($PGEXE) { [void](Start-Process -FilePath $PGEXE) }
       elseif (Test-Path -LiteralPath $vbsNovo) { [void](Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') -ArgumentList ('"' + $vbsNovo + '"')) }
       else { [void](Start-Process -FilePath (Join-Path $dir 'Paginas.bat')) }
     } catch { }
