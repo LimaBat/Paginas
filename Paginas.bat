@@ -2764,18 +2764,48 @@ const UPD = { tag: '', notes: '', busy: false };
 const verNum = v => String(v || '').replace(/^[vV]/, '').split('.').map(n => parseInt(n, 10) || 0);
 function isNewer(a, b) { const x = verNum(a), y = verNum(b); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d > 0; } return false; }
 const siteUrl = () => { const [o, r] = APP.repo.split('/'); return o && r ? 'https://' + o.toLowerCase() + '.github.io/' + r + '/' : ''; };
+// arquivo que esta cópia usa: o aviso só aparece quando ele já está publicado na versão nova
+const pacoteUpd = () => APP.plat === 'android' ? 'Paginas.apk' : 'Paginas.bat';
 async function checkUpdate() {
   if (!IS_APP || !APP.repo) return;
   try {
     const r = await fetch('https://api.github.com/repos/' + APP.repo + '/releases/latest', { headers: { Accept: 'application/vnd.github+json' } });
     if (!r.ok) return;
     const j = await r.json();
-    if (j.tag_name && isNewer(j.tag_name, APP.versao)) {
+    const temArquivo = (j.assets || []).some(a => a.name === pacoteUpd());
+    if (j.tag_name && temArquivo && isNewer(j.tag_name, APP.versao)) {
       UPD.tag = j.tag_name; UPD.notes = String(j.body || '').split('\n')[0].slice(0, 160);
-      toast('Nova versão do Páginas disponível (' + j.tag_name + '). Veja em Ajustes.');
+      atuBanner();
       if (view === 'settings') render();
     }
   } catch (e) {}
+}
+// aviso de versão nova (igual ao do Investe.AI): fica no rodapé até a pessoa atualizar ou tocar em "Depois"
+function atuBanner(forcar) {
+  if (!UPD.tag || $('#atu-b')) return;
+  let ign = ''; try { ign = localStorage.getItem('atu_ignorar') || ''; } catch (e) {}
+  if (!forcar && ign === UPD.tag) return;
+  const v = UPD.tag.replace(/^[vV]/, ''), and = APP.plat === 'android';
+  document.body.insertAdjacentHTML('beforeend', `<div id="atu-b" class="atu-b" role="alert"><div class="atu-ic">⬆️</div><div class="atu-tx"><b>Nova versão ${esc(v)} do Páginas</b><span>Você está na ${esc(APP.versao)}.${UPD.notes ? ' ' + esc(UPD.notes) : ''}</span></div>
+    <div class="atu-bts"><button class="btn primary" id="atu-ok">${and ? '⬇ Baixar a versão nova' : 'Atualizar agora'}</button><button class="btn" id="atu-no">Depois</button></div></div>`);
+  $('#atu-no').onclick = () => { try { localStorage.setItem('atu_ignorar', UPD.tag); } catch (e) {} $('#atu-b').remove(); };
+  $('#atu-ok').onclick = async () => {
+    const b = $('#atu-ok'), box = $('#atu-b');
+    if (and) {
+      location.href = 'https://github.com/' + APP.repo + '/releases/latest/download/Paginas.apk';
+      box.querySelector('.atu-tx').innerHTML = '<b>Baixando a versão nova…</b><span>Quando terminar, toque no arquivo <b>Paginas.apk</b> na notificação de download e em <b>Instalar</b>. Seus dados continuam aqui.</span>';
+      b.textContent = '⬇ Baixar de novo';
+      return;
+    }
+    b.disabled = true; b.textContent = 'Baixando…';
+    try {
+      await flushSave(); if (GS.connected) await Sync.push();
+      await api('/api/atualizar', { method: 'POST' });
+      box.querySelector('.atu-tx').innerHTML = '<b>Atualizado!</b><span>O Páginas vai fechar e abrir de novo já na versão nova.</span>';
+      box.querySelector('.atu-bts').remove();
+      setTimeout(() => { try { window.close(); } catch (e) {} }, 1800);
+    } catch (e) { b.disabled = false; b.textContent = 'Tentar de novo'; toast('Não consegui atualizar: ' + e.message); }
+  };
 }
 async function doUpdate() {
   if (APP.plat === 'android') { location.href = 'https://github.com/' + APP.repo + '/releases/latest/download/Paginas.apk'; toast('Baixando a versão nova. Abra o arquivo para instalar.'); return; }
@@ -2788,6 +2818,10 @@ async function doUpdate() {
     setTimeout(() => { try { window.close(); } catch (e) {} }, 1500);
   } catch (e) { UPD.busy = false; toast('Não consegui atualizar: ' + e.message); render(); }
 }
+// procura de novo a cada 3 horas e quando o app volta para a tela (celular que ficou dias aberto)
+let _updUlt = Date.now();
+setInterval(() => { _updUlt = Date.now(); checkUpdate(); }, 3 * 3600 * 1000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && Date.now() - _updUlt > 3600 * 1000) { _updUlt = Date.now(); checkUpdate(); } });
 
 /* ---------- Ajustes ---------- */
 function settingsAI() {
@@ -3825,6 +3859,11 @@ setInterval(() => { if (typeof R !== 'undefined' && R) agendaJogo(); }, 60000);
 .pstats button{cursor:pointer}.pstats b{font-size:1.05rem;color:var(--ink)}
 .socin{padding:2rem 1.2rem}
 .tgl{display:flex;align-items:center;gap:.5rem;font-weight:600}
+.atu-b{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:95;display:flex;align-items:center;gap:14px;width:max-content;max-width:min(720px,94vw);padding:14px 16px;border:1px solid var(--accent);border-radius:18px;background:var(--card);color:var(--ink);box-shadow:0 20px 50px -10px rgba(0,0,0,.45);animation:atuSobe .45s cubic-bezier(.2,1.2,.4,1)}
+.atu-ic{font-size:1.6rem}.atu-tx{flex:1;min-width:0}.atu-tx span{display:block;font-size:.85rem;color:var(--muted);margin-top:2px}
+.atu-bts{display:flex;gap:8px;flex:none}
+@keyframes atuSobe{from{transform:translate(-50%,40px);opacity:0}}
+@media(max-width:760px){.atu-b{flex-wrap:wrap;width:calc(100vw - 20px);bottom:10px;padding:16px}.atu-tx b{font-size:1.02rem}.atu-bts{width:100%}.atu-bts .btn{flex:1;padding:.75rem}.atu-bts .btn:last-child{flex:0 0 auto}}
 </style>
 </body>
 </html>
