@@ -84,12 +84,18 @@ jobs:
         shell: powershell
         run: |
           $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-          & $csc /nologo /target:winexe /codepage:65001 /optimize+ /win32icon:icone.ico "/resource:build\Paginas.bat,Paginas.bat" /r:System.Windows.Forms.dll /out:build\Paginas.exe ferramentas\lancador.cs
+          $sma = (Get-ChildItem "$env:WINDIR\Microsoft.NET\assembly\GAC_MSIL\System.Management.Automation" -Recurse -Filter System.Management.Automation.dll | Select-Object -First 1).FullName
+          $v = ($env:VERSAO -replace '^[vV]', ''); if (-not $v) { $v = '0.0.' + $env:GITHUB_RUN_NUMBER }
+          $p = @($v.Split('.') | ForEach-Object { [int]$_ }); while ($p.Count -lt 4) { $p += 0 }
+          $vf = ($p[0..3] -join '.')
+          Set-Content build\versao.cs "[assembly: System.Reflection.AssemblyVersion(`"$vf`")]`n[assembly: System.Reflection.AssemblyFileVersion(`"$vf`")]`n[assembly: System.Reflection.AssemblyInformationalVersion(`"$v`")]" -Encoding UTF8
+          & $csc /nologo /target:winexe /codepage:65001 /optimize+ /win32icon:icone.ico /win32manifest:ferramentas\paginas.manifest "/resource:build\Paginas.bat,Paginas.bat" /r:System.Windows.Forms.dll /r:System.Drawing.dll "/r:$sma" /out:build\Paginas.exe ferramentas\lancador.cs build\versao.cs
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path build\Paginas.exe)) { throw "falha ao compilar o Paginas.exe" }
           Add-Type -AssemblyName System.Drawing
           $ic = [System.Drawing.Icon]::ExtractAssociatedIcon((Resolve-Path build\Paginas.exe).Path)
           if (-not $ic) { throw "o .exe ficou sem ícone" }
-          Write-Host "Paginas.exe: $((Get-Item build\Paginas.exe).Length) bytes, com icone"
+          $fv = (Get-Item build\Paginas.exe).VersionInfo
+          Write-Host "Paginas.exe: $((Get-Item build\Paginas.exe).Length) bytes, com icone, versao $($fv.FileVersion), $($fv.CompanyName)"
       - name: Testar o programa pelo .exe (abre sem janela e responde)
         shell: powershell
         run: |
@@ -105,9 +111,25 @@ jobs:
             if (-not (Test-Path -LiteralPath $ico)) { throw "atalho sem icone em $pasta" }
             Write-Host "atalho ok em $pasta (icone: $ico)"
           }
+          $lnkExe = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) $nome)).TargetPath
+          if ($lnkExe -notlike '*\Paginas\Paginas.exe') { throw "o atalho deveria abrir o Paginas.exe instalado, mas abre: $lnkExe" }
+          if (Test-Path "$env:LOCALAPPDATA\Paginas\abrir.vbs") { throw "no modo .exe nao deveria existir abrir.vbs" }
+          $pr = Get-Process Paginas -ErrorAction SilentlyContinue
+          if (-not $pr) { throw "o servidor deveria estar rodando dentro do Paginas.exe" }
+          if (Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like '*PS_START*' }) { throw "nao deveria abrir powershell.exe escondido" }
+          $porta2, $tk2 = (Get-Content $env:PAGINAS_TESTE).Split(' ')
+          Invoke-RestMethod "http://127.0.0.1:$porta2/api/notif?t=$tk2" -Method Post -ContentType 'application/json' -Body '{"on":true,"horas":["09:00"]}' | Out-Null
+          $acao = (Get-ScheduledTask -TaskName 'Paginas - Reflexoes').Actions[0]
+          if ($acao.Execute -notlike '*Paginas.exe' -or $acao.Arguments -ne '--reflexao') { throw "a tarefa deveria abrir o Paginas.exe --reflexao" }
+          Start-Process -FilePath "$env:LOCALAPPDATA\Paginas\Paginas.exe" -ArgumentList '--reflexao' -Wait
+          if (Get-Content "$env:LOCALAPPDATA\Paginas\erro.log" -ErrorAction SilentlyContinue | Select-String 'notificacao|lancador') { Write-Host "::warning::$(Get-Content "$env:LOCALAPPDATA\Paginas\erro.log" -Raw)" } else { Write-Host "reflexao pelo .exe sem erro" }
+          Invoke-RestMethod "http://127.0.0.1:$porta2/api/notif?t=$tk2" -Method Post -ContentType 'application/json' -Body '{"on":false}' | Out-Null
+          try { Invoke-RestMethod "http://127.0.0.1:$porta2/api/bye?t=$tk2" | Out-Null } catch {}
           Remove-Item $env:PAGINAS_TESTE
-          Start-Sleep 2
-          Write-Host "o .exe abriu e criou o atalho"
+          Start-Sleep 8
+          Get-Process Paginas -ErrorAction SilentlyContinue | Stop-Process -Force
+          Remove-Item "$env:LOCALAPPDATA\Paginas\atalho.ok" -ErrorAction SilentlyContinue
+          Write-Host "o .exe abriu sem powershell escondido, criou o atalho e agendou as reflexoes"
       - name: Testar o programa (abre sem janela e responde)
         shell: powershell
         run: |
