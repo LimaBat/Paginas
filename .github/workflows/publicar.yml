@@ -89,7 +89,16 @@ jobs:
           $p = @($v.Split('.') | ForEach-Object { [int]$_ }); while ($p.Count -lt 4) { $p += 0 }
           $vf = ($p[0..3] -join '.')
           Set-Content build\versao.cs "[assembly: System.Reflection.AssemblyVersion(`"$vf`")]`n[assembly: System.Reflection.AssemblyFileVersion(`"$vf`")]`n[assembly: System.Reflection.AssemblyInformationalVersion(`"$v`")]" -Encoding UTF8
-          & $csc /nologo /target:winexe /codepage:65001 /optimize+ /win32icon:icone.ico /win32manifest:ferramentas\paginas.manifest "/resource:build\Paginas.bat,Paginas.bat" /r:System.Windows.Forms.dll /r:System.Drawing.dll "/r:$sma" /out:build\Paginas.exe ferramentas\lancador.cs build\versao.cs
+          # WebView2 (janela própria do Páginas): bibliotecas oficiais da Microsoft, do NuGet
+          $vers = (Invoke-RestMethod 'https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/index.json').versions | Where-Object { $_ -notmatch '-' } | Select-Object -Last 1
+          Write-Host "WebView2 SDK $vers"
+          Invoke-WebRequest "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$vers/microsoft.web.webview2.$vers.nupkg" -OutFile build\wv2.zip
+          Expand-Archive build\wv2.zip build\wv2 -Force
+          $lib = Get-ChildItem build\wv2\lib -Directory | Where-Object { $_.Name -match '^net4' } | Sort-Object Name -Descending | Select-Object -First 1
+          $core = Join-Path $lib.FullName 'Microsoft.Web.WebView2.Core.dll'; $wf = Join-Path $lib.FullName 'Microsoft.Web.WebView2.WinForms.dll'
+          $rec = @("/resource:build\Paginas.bat,Paginas.bat", "/resource:ferramentas\abertura.html,abertura.html", "/resource:$core,Microsoft.Web.WebView2.Core.dll", "/resource:$wf,Microsoft.Web.WebView2.WinForms.dll")
+          foreach ($a in 'x64', 'x86', 'arm64') { $rec += "/resource:build\wv2\runtimes\win-$a\native\WebView2Loader.dll,WebView2Loader.$a.dll" }
+          & $csc /nologo /target:winexe /codepage:65001 /optimize+ /win32icon:icone.ico /win32manifest:ferramentas\paginas.manifest @rec /r:System.Windows.Forms.dll /r:System.Drawing.dll "/r:$sma" "/r:$core" "/r:$wf" /out:build\Paginas.exe ferramentas\lancador.cs build\versao.cs
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path build\Paginas.exe)) { throw "falha ao compilar o Paginas.exe" }
           Add-Type -AssemblyName System.Drawing
           $ic = [System.Drawing.Icon]::ExtractAssociatedIcon((Resolve-Path build\Paginas.exe).Path)
@@ -111,6 +120,14 @@ jobs:
             if (-not (Test-Path -LiteralPath $ico)) { throw "atalho sem icone em $pasta" }
             Write-Host "atalho ok em $pasta (icone: $ico)"
           }
+          $wv2 = Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue
+          Write-Host "WebView2 no computador de teste: $(if ($wv2) { $wv2.pv } else { 'nao' })"
+          for ($k = 0; $k -lt 40 -and -not (Test-Path "$env:PAGINAS_TESTE.janela"); $k++) { Start-Sleep 1 }
+          if (Test-Path "$env:PAGINAS_TESTE.janela") {
+            $jr = Get-Content "$env:PAGINAS_TESTE.janela" -Raw
+            if ($jr -notlike 'ok http://127.0.0.1*') { throw "a janela propria do Paginas falhou: $jr" }
+            Write-Host "janela propria do Paginas abriu o programa: $jr"
+          } else { Write-Host "::warning::a janela propria (WebView2) nao abriu no computador de teste; log: $(Get-Content "$env:LOCALAPPDATA\Paginas\erro.log" -Raw -ErrorAction SilentlyContinue)" }
           $lnkExe = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) $nome)).TargetPath
           if ($lnkExe -notlike '*\Paginas\Paginas.exe') { throw "o atalho deveria abrir o Paginas.exe instalado, mas abre: $lnkExe" }
           if (Test-Path "$env:LOCALAPPDATA\Paginas\abrir.vbs") { throw "no modo .exe nao deveria existir abrir.vbs" }

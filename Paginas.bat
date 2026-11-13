@@ -195,6 +195,7 @@ $f=[IO.File]::ReadAllText($env:PAGINAS_SELF,[Text.Encoding]::UTF8).Replace([stri
   foreach ($try in 1..40) {
     $p = Get-Random -Minimum 49200 -Maximum 65000
     if ($try -eq 1 -and $fixedPort -ge 1024 -and $fixedPort -le 65535) { $p = $fixedPort }
+    elseif ($try -le 2) { $p = 47631 + $try - 1 }
     $l = New-Object System.Net.HttpListener
     $l.Prefixes.Add('http://127.0.0.1:' + $p + '/')
     try { $l.Start(); $listener = $l; $port = $p; break } catch { $l.Close() }
@@ -653,11 +654,13 @@ try {
     if ($base) { $cands += (Join-Path $base 'Google\Chrome\Application\chrome.exe') }
   }
   $exe = $cands | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-  $env:PAGINAS_PRONTO = '1'   # avisa o Paginas.exe que o programa abriu (fecha a janela "Abrindo o Paginas...")
+  $env:PAGINAS_PRONTO = '1'   # avisa o Paginas.exe que o programa abriu
+  if ($env:PAGINAS_JANELA -eq '1') { $env:PAGINAS_URL = $url + '?j=1' }   # o Paginas.exe mostra o programa na janela dele
   if ($env:PAGINAS_TESTE) {
     # teste automatico (GitHub Actions): sem janela; informa a porta e a senha da sessao
     [IO.File]::WriteAllText($env:PAGINAS_TESTE, ([string]$port + ' ' + $token))
   }
+  elseif ($env:PAGINAS_JANELA -eq '1') { }
   elseif ($exe) {
     $prof = Join-Path $dir 'janela'
     $argList = @(('--app=' + $url), ('--user-data-dir="' + $prof + '"'), '--no-first-run', '--no-default-browser-check', '--window-size=1200,820')
@@ -684,6 +687,7 @@ try {
     if (-not $S.everPinged -and ($now - $started).TotalSeconds -gt 120) { break }
     if ($S.everPinged -and ($now - $S.lastPing).TotalSeconds -gt 600) { break }
     if ($null -ne $S.restart -and ($now - $S.restart).TotalSeconds -gt 1.5) { break }
+    if ($env:PAGINAS_FECHAR -eq '1') { break }   # a janela do Paginas.exe foi fechada
   }
   $listener.Stop()
   $listener.Close()
@@ -857,20 +861,42 @@ dialog form{display:flex;flex-direction:column;gap:.8rem}
 <style>
 html{background:#f6f1e7}
 html.escuro{background:#1b1815}
-#splash{position:fixed;inset:0;z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.9rem;background:#f6f1e7;color:#7a6f63;transition:opacity .5s ease,visibility .5s}
-#splash.out{opacity:0;visibility:hidden}
-#splash svg{width:104px;height:104px;filter:drop-shadow(0 14px 18px rgba(120,60,25,.35));animation:spfloat 2.4s ease-in-out infinite}
-#splash b{font:700 2rem Lora,Georgia,serif;color:#b4532a}
-#splash span{font:600 .95rem Nunito,system-ui,sans-serif}
-#splash i{display:block;width:180px;height:5px;border-radius:9px;background:#eadfca;overflow:hidden}
-#splash i::after{content:'';display:block;width:40%;height:100%;border-radius:9px;background:linear-gradient(90deg,#b4532a,#e08a5c);animation:spbar 1.2s ease-in-out infinite}
-@keyframes spbar{0%{transform:translateX(-110%)}100%{transform:translateX(260%)}}
-@keyframes spfloat{50%{transform:translateY(-6px)}}
-.escuro #splash{background:#1b1815;color:#a39886}.escuro #splash b{color:#e08a5c}.escuro #splash i{background:#383128}
+#splash{position:fixed;inset:0;z-index:100;display:grid;place-items:center;overflow:hidden;--sb:#f6f1e7;--si:#2a2420;--sm:#8a7c6c;--s1:#e08a5c;--s2:#a0401e;--s3:#e0b04a;--st:rgba(160,64,30,.12);background:var(--sb);color:var(--si);font-family:"Segoe UI",system-ui,sans-serif;transition:opacity .5s ease,visibility .5s,transform .5s ease}
+.escuro #splash{--sb:#14110e;--si:#f0e8db;--sm:#a39886;--st:rgba(240,232,219,.12)}
+#splash.out{opacity:0;visibility:hidden;transform:scale(1.03)}
+#splash .so{position:absolute;border-radius:50%;filter:blur(80px);opacity:.42;animation:spflut 16s ease-in-out infinite}
+#splash .so.a{width:420px;height:420px;background:var(--s1);top:-150px;right:2%}
+#splash .so.b{width:340px;height:340px;background:var(--s3);bottom:-150px;left:2%;opacity:.3;animation-delay:-6s;animation-duration:20s}
+#splash .sc{position:relative;display:flex;flex-direction:column;align-items:center;text-align:center;padding:24px;animation:spentra .8s cubic-bezier(.2,.8,.2,1) both}
+#splash .sl{position:relative;width:124px;height:124px;display:grid;place-items:center;margin-bottom:26px}
+#splash .sa{position:absolute;inset:0;border-radius:34px;background:conic-gradient(from 0deg,var(--s3),var(--s1),var(--s2),#c47bd6,var(--s3));animation:spgira 3.4s linear infinite}
+#splash .sa::after{content:"";position:absolute;inset:3px;border-radius:31px;background:var(--sb)}
+#splash .sp{position:absolute;inset:-8px;border-radius:42px;border:2px solid var(--s1);opacity:0;animation:sppulso 2.4s ease-out infinite}
+#splash .sp.b{animation-delay:1.2s}
+#splash .sn{position:relative;width:98px;height:98px;border-radius:28px;background:linear-gradient(135deg,var(--s1),var(--s2));display:grid;place-items:center;box-shadow:0 16px 44px -12px rgba(160,64,30,.65);animation:spflutua 3s ease-in-out infinite;perspective:300px}
+#splash .lv{position:relative;width:58px;height:40px}
+#splash .lv u{position:absolute;top:0;width:29px;height:40px;border-radius:2px}
+#splash .lv .e{left:0;background:#fffcf6;transform:skewY(10deg);transform-origin:right}
+#splash .lv .d{right:0;background:#f6e8d4;transform:skewY(-10deg);transform-origin:left}
+#splash .lv .v{right:0;background:#fffaf0;transform-origin:left center;animation:spfolha 2.2s cubic-bezier(.45,.05,.55,.95) infinite}
+#splash b{font:700 2.6rem/1.1 Georgia,"Times New Roman",serif;background:linear-gradient(90deg,var(--s2),var(--s1),var(--s3),var(--s1),var(--s2));background-size:250% auto;-webkit-background-clip:text;background-clip:text;color:transparent;animation:spbrilho 5s linear infinite}
+#splash small{color:var(--sm);margin-top:6px;font-size:.92rem;letter-spacing:.3px}
+#splash .sb{width:min(300px,70vw);height:6px;border-radius:99px;background:var(--st);overflow:hidden;margin-top:28px}
+#splash .sb i{display:block;height:100%;width:45%;border-radius:99px;background:linear-gradient(90deg,var(--s3),var(--s1),var(--s2));box-shadow:0 0 14px rgba(224,138,92,.6);animation:spbar 1.6s ease-in-out infinite}
+#splash .sm{margin-top:12px;font-size:.85rem;color:var(--sm)}
+@keyframes spflut{50%{transform:translate(36px,-26px) scale(1.1)}}
+@keyframes spentra{from{opacity:0;transform:translateY(16px) scale(.97)}}
+@keyframes spgira{to{transform:rotate(360deg)}}
+@keyframes sppulso{0%{transform:scale(.9);opacity:.7}100%{transform:scale(1.5);opacity:0}}
+@keyframes spflutua{50%{transform:translateY(-6px)}}
+@keyframes spfolha{0%,15%{transform:rotateY(0) skewY(-10deg)}55%,100%{transform:rotateY(-180deg) skewY(-10deg)}}
+@keyframes spbrilho{to{background-position:250% 0}}
+@keyframes spbar{0%{transform:translateX(-110%)}100%{transform:translateX(240%)}}
+@media(prefers-reduced-motion:reduce){#splash *{animation-duration:.01ms!important;animation-iteration-count:1!important}}
 </style>
 </head>
 <body>
-<div id="splash"><svg viewBox="0 0 100 100" aria-hidden="true"><defs><linearGradient id="spg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#e08a5c"/><stop offset="1" stop-color="#a0401e"/></linearGradient></defs><rect width="100" height="100" rx="22" fill="url(#spg)"/><polygon points="16,34 48,43 48,80 16,71" fill="#fffcf6"/><polygon points="52,43 84,34 84,71 52,80" fill="#f6e8d4"/><g stroke="#b4532a" stroke-opacity=".6" stroke-width="1.8" stroke-linecap="round"><path d="M22 50L43 55M22 58L43 63M57 55L78 50M57 63L78 58"/></g></svg><b>Páginas</b><i></i><span>Abrindo sua biblioteca...</span></div>
+<div id="splash"><span class="so a"></span><span class="so b"></span><div class="sc"><div class="sl"><span class="sp"></span><span class="sp b"></span><span class="sa"></span><div class="sn"><div class="lv"><u class="e"></u><u class="d"></u><u class="v"></u></div></div></div><b>Páginas</b><small>Hábito de leitura e biblioteca virtual</small><div class="sb"><i></i></div><div class="sm">Abrindo sua biblioteca…</div></div></div>
 <header>
   <div class="bar">
     <div class="brand">Páginas</div>
@@ -3766,10 +3792,11 @@ setInterval(() => { if (typeof R !== 'undefined' && R) agendaJogo(); }, 60000);
 (function () {
   const sp = document.getElementById('splash'); if (!sp) return;
   const t0 = performance.now();
+  const minimo = /[?&]j=1/.test(location.search) ? 0 : 1100;  // vindo da abertura do Paginas.exe: entra direto
   const hide = () => { sp.classList.add('out'); setTimeout(() => sp.remove(), 700); };
   const tick = () => {
     const t = performance.now() - t0;
-    if ((window.__booted && t > 1100) || t > 9000) hide(); else setTimeout(tick, 120);
+    if ((window.__booted && t > minimo) || t > 9000) hide(); else setTimeout(tick, 120);
   };
   tick();
 })();

@@ -1,6 +1,10 @@
-// Paginas.exe: abre o Páginas com o ícone e uma janela de abertura.
-// O programa (a parte em PowerShell do Paginas.bat) roda DENTRO deste .exe, pelo PowerShell do próprio Windows:
-// nada de powershell.exe escondido, de .vbs ou de "ExecutionPolicy Bypass".
+// Paginas.exe: o Páginas como programa próprio do Windows.
+// - Janela própria (WebView2, o motor do Edge que já vem no Windows): aparece como "Páginas" na barra de
+//   tarefas, com o ícone, e pode ser fixada nela.
+// - Tela de abertura animada enquanto o programa liga.
+// - O programa (a parte em PowerShell do Paginas.bat) roda DENTRO deste .exe: nada de powershell.exe
+//   escondido, de .vbs ou de "ExecutionPolicy Bypass".
+// - Sem WebView2 no computador, abre como antes, numa janela do Edge.
 // Compilado no GitHub Actions com o csc.exe do .NET Framework (vem em todo Windows).
 using System;
 using System.Diagnostics;
@@ -9,6 +13,8 @@ using System.IO;
 using System.Management.Automation;
 using System.Management.Automation.Runspaces;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -22,22 +28,50 @@ using System.Windows.Forms;
 
 static class Lancador
 {
-    static string pasta;
+    internal static string pasta;
+    internal static Thread trabalho;
+    internal static EventWaitHandle mostrar;
+    const string APP_ID = "LimaBat.Paginas";
+
+    [DllImport("shell32.dll", SetLastError = true)]
+    static extern void SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string id);
 
     [STAThread]
     static int Main(string[] args)
     {
         pasta = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Paginas");
+        bool reflexao = args.Length > 0 && args[0] == "--reflexao";
+        Mutex unico = null;
         try
         {
             Directory.CreateDirectory(pasta);
-            bool reflexao = args.Length > 0 && args[0] == "--reflexao";
+            try { SetCurrentProcessExplicitAppUserModelID(APP_ID); } catch { }
+            AppDomain.CurrentDomain.AssemblyResolve += ResolverDll;
+
+            if (!reflexao)
+            {
+                // um Páginas só: se já estiver aberto, traz a janela para a frente
+                bool novo;
+                unico = new Mutex(true, "Local\\Paginas.App", out novo);
+                mostrar = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\Paginas.Mostrar");
+                if (!novo)
+                {
+                    // já aberto: traz a janela. Se o outro estiver só fechando (atualização), espera ele sair e abre.
+                    mostrar.Set();
+                    bool pegou;
+                    try { pegou = unico.WaitOne(4000); } catch (AbandonedMutexException) { pegou = true; }
+                    if (!pegou) return 0;
+                    mostrar.Reset();
+                }
+            }
+
             string exe = Instalar();
             string bat = Path.Combine(pasta, "Paginas.bat");
             if (!reflexao) GuardarPrograma(bat);
             Environment.SetEnvironmentVariable("PAGINAS_SELF", bat);
             Environment.SetEnvironmentVariable("PAGINAS_EXE", exe);
             Environment.SetEnvironmentVariable("PAGINAS_PRONTO", null);
+            Environment.SetEnvironmentVariable("PAGINAS_URL", null);
 
             if (reflexao)
             {
@@ -52,23 +86,64 @@ static class Lancador
             if (i < 0 || j < 0) throw new Exception("O arquivo do programa está incompleto. Baixe o Páginas de novo.");
             string script = texto.Substring(i + 10, j - i - 10);
 
-            Exception erro = null;
-            Thread t = new Thread(() => { try { Rodar(script, null); } catch (Exception e) { erro = e; } });
-            t.SetApartmentState(ApartmentState.STA);
-            t.IsBackground = false;
-            t.Start();
-
             Application.EnableVisualStyles();
-            Application.Run(new Abertura(t));
-            t.Join();
+            Application.SetCompatibleTextRenderingDefault(false);
+            bool janela = TemWebView2();
+            Environment.SetEnvironmentVariable("PAGINAS_JANELA", janela ? "1" : null);
+
+            Exception erro = null;
+            trabalho = new Thread(() => { try { Rodar(script, null); } catch (Exception e) { erro = e; } });
+            trabalho.SetApartmentState(ApartmentState.STA);
+            trabalho.Start();
+
+            if (janela) AbrirJanela();
+            else Application.Run(new Abertura());
+            trabalho.Join(15000);
             if (erro != null && Environment.GetEnvironmentVariable("PAGINAS_PRONTO") != "1") throw erro;
+            Environment.Exit(0);
             return 0;
         }
         catch (Exception e)
         {
             try { File.AppendAllText(Path.Combine(pasta, "erro.log"), DateTime.Now.ToString("s") + " lancador: " + e + "\r\n"); } catch { }
-            MessageBox.Show("Não consegui abrir o Páginas.\n\n" + e.Message, "Páginas", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (!reflexao) MessageBox.Show("Não consegui abrir o Páginas.\n\n" + e.Message, "Páginas", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
+        }
+        finally { GC.KeepAlive(unico); }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static void AbrirJanela() { Application.Run(new Janela()); }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static bool TemWebView2()
+    {
+        if (Environment.GetEnvironmentVariable("PAGINAS_SEM_JANELA") == "1") return false;
+        try { return PreparaWebView2.Pronto(); }
+        catch (Exception e)
+        {
+            try { File.AppendAllText(Path.Combine(pasta, "erro.log"), DateTime.Now.ToString("s") + " webview2: " + e.Message + "\r\n"); } catch { }
+            return false;
+        }
+    }
+
+    // as bibliotecas do WebView2 vêm dentro deste .exe
+    static Assembly ResolverDll(object s, ResolveEventArgs a)
+    {
+        string nome = new AssemblyName(a.Name).Name + ".dll";
+        using (Stream st = Assembly.GetExecutingAssembly().GetManifestResourceStream(nome))
+        {
+            if (st == null) return null;
+            using (MemoryStream ms = new MemoryStream()) { st.CopyTo(ms); return Assembly.Load(ms.ToArray()); }
+        }
+    }
+
+    internal static byte[] Recurso(string nome)
+    {
+        using (Stream st = Assembly.GetExecutingAssembly().GetManifestResourceStream(nome))
+        {
+            if (st == null) return null;
+            using (MemoryStream ms = new MemoryStream()) { st.CopyTo(ms); return ms.ToArray(); }
         }
     }
 
@@ -81,7 +156,6 @@ static class Lancador
         {
             rs.ThreadOptions = PSThreadOptions.UseCurrentThread;
             rs.Open();
-            if (arquivo != null) rs.SessionStateProxy.SetVariable("PSCommandPath", arquivo);
             using (PowerShell ps = PowerShell.Create())
             {
                 ps.Runspace = rs;
@@ -95,7 +169,7 @@ static class Lancador
         }
     }
 
-    /// Guarda uma cópia do Paginas.exe na pasta do app (os atalhos apontam para ela).
+    /// Guarda uma cópia do Paginas.exe na pasta do app (os atalhos e a barra de tarefas apontam para ela).
     static string Instalar()
     {
         string eu = Application.ExecutablePath;
@@ -119,9 +193,7 @@ static class Lancador
     /// Guarda o Paginas.bat que vem dentro do .exe, sem trocar uma versão mais nova (atualizada pelo próprio app).
     static void GuardarPrograma(string bat)
     {
-        byte[] emb;
-        using (Stream s = Assembly.GetExecutingAssembly().GetManifestResourceStream("Paginas.bat"))
-        using (MemoryStream ms = new MemoryStream()) { s.CopyTo(ms); emb = ms.ToArray(); }
+        byte[] emb = Recurso("Paginas.bat");
         bool escrever = !File.Exists(bat);
         if (!escrever)
         {
@@ -145,40 +217,183 @@ static class Lancador
         try { return new Version(v); } catch { return new Version(0, 0); }
     }
 
-    /// Janela "Abrindo o Páginas…" até o programa ficar pronto.
-    class Abertura : Form
+    internal static Icon Icone() { try { return Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { return null; } }
+}
+
+/// Coloca a biblioteca nativa do WebView2 na pasta do app e confere se o Windows tem o WebView2.
+static class PreparaWebView2
+{
+    public static bool Pronto()
     {
-        readonly Thread trab;
-        readonly DateTime ini = DateTime.Now;
+        string arq = Environment.Is64BitProcess
+            ? (string.Equals(Environment.GetEnvironmentVariable("PROCESSOR_ARCHITECTURE"), "ARM64", StringComparison.OrdinalIgnoreCase) ? "arm64" : "x64")
+            : "x86";
+        byte[] dll = Lancador.Recurso("WebView2Loader." + arq + ".dll");
+        if (dll == null) return false;
+        string dir = Path.Combine(Lancador.pasta, "wv2", arq);
+        Directory.CreateDirectory(dir);
+        string alvo = Path.Combine(dir, "WebView2Loader.dll");
+        if (!File.Exists(alvo) || new FileInfo(alvo).Length != dll.Length) File.WriteAllBytes(alvo, dll);
+        Microsoft.Web.WebView2.Core.CoreWebView2Environment.SetLoaderDllFolderPath(dir);
+        string v = Microsoft.Web.WebView2.Core.CoreWebView2Environment.GetAvailableBrowserVersionString();
+        return !string.IsNullOrEmpty(v);
+    }
+}
 
-        public Abertura(Thread t)
+/// A janela do Páginas.
+class Janela : Form
+{
+    readonly Microsoft.Web.WebView2.WinForms.WebView2 wv;
+    readonly System.Windows.Forms.Timer tm = new System.Windows.Forms.Timer { Interval = 120 };
+    bool entregue, fechando, carregou;
+    readonly DateTime ini = DateTime.Now;
+
+    public Janela()
+    {
+        Text = "Páginas";
+        Icon = Lancador.Icone();
+        StartPosition = FormStartPosition.CenterScreen;
+        Size = new Size(1240, 840);
+        MinimumSize = new Size(420, 560);
+        WindowState = FormWindowState.Maximized;
+        bool escuro = TemaEscuro();
+        BackColor = escuro ? Color.FromArgb(20, 17, 14) : Color.FromArgb(246, 241, 231);
+        wv = new Microsoft.Web.WebView2.WinForms.WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = BackColor };
+        wv.CreationProperties = new Microsoft.Web.WebView2.WinForms.CoreWebView2CreationProperties { UserDataFolder = Path.Combine(Lancador.pasta, "WebView2") };
+        Controls.Add(wv);
+        Load += async (s, e) =>
         {
-            trab = t;
-            Text = "Páginas";
-            try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
-            FormBorderStyle = FormBorderStyle.None;
-            StartPosition = FormStartPosition.CenterScreen;
-            Size = new Size(340, 140);
-            BackColor = Color.FromArgb(246, 241, 231);
-            ShowInTaskbar = true;
-            PictureBox img = new PictureBox { Size = new Size(64, 64), Location = new Point(26, 38), SizeMode = PictureBoxSizeMode.Zoom };
-            try { img.Image = Icon.ExtractAssociatedIcon(Application.ExecutablePath).ToBitmap(); } catch { }
-            Label t1 = new Label { Text = "Páginas", Font = new Font("Georgia", 18, FontStyle.Bold), ForeColor = Color.FromArgb(180, 83, 42), AutoSize = true, Location = new Point(104, 40) };
-            Label t2 = new Label { Text = "Abrindo sua biblioteca…", Font = new Font("Segoe UI", 10), ForeColor = Color.FromArgb(122, 111, 99), AutoSize = true, Location = new Point(107, 78) };
-            Controls.Add(img); Controls.Add(t1); Controls.Add(t2);
-            System.Windows.Forms.Timer tm = new System.Windows.Forms.Timer { Interval = 150 };
-            tm.Tick += (s, e) =>
+            try
             {
-                bool pronto = Environment.GetEnvironmentVariable("PAGINAS_PRONTO") == "1";
-                if ((pronto && (DateTime.Now - ini).TotalMilliseconds > 900) || !trab.IsAlive || (DateTime.Now - ini).TotalSeconds > 25) { tm.Stop(); Close(); }
-            };
-            tm.Start();
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
+                await wv.EnsureCoreWebView2Async();
+                var c = wv.CoreWebView2;
+                c.Settings.AreDevToolsEnabled = false;
+                c.Settings.IsStatusBarEnabled = false;
+                c.Settings.IsZoomControlEnabled = true;
+                c.DocumentTitleChanged += (a, b) => { Text = "Páginas"; };
+                c.WindowCloseRequested += (a, b) => Close();
+                c.NewWindowRequested += (a, b) => { b.Handled = true; AbrirFora(b.Uri); };
+                c.NavigationStarting += (a, b) =>
+                {
+                    // links de fora (Google, GitHub, sites) abrem no navegador
+                    if (b.Uri.StartsWith("http", StringComparison.OrdinalIgnoreCase) && !b.Uri.StartsWith("http://127.0.0.1", StringComparison.OrdinalIgnoreCase)) { b.Cancel = true; AbrirFora(b.Uri); }
+                };
+                c.NavigationCompleted += (a, b) =>
+                {
+                    if (b.IsSuccess && c.Source.StartsWith("http://127.0.0.1")) { carregou = true; Teste("ok " + c.Source); }
+                };
+                string html = Encoding.UTF8.GetString(Lancador.Recurso("abertura.html"));
+                wv.NavigateToString(html);
+            }
+            catch (Exception ex)
+            {
+                try { File.AppendAllText(Path.Combine(Lancador.pasta, "erro.log"), DateTime.Now.ToString("s") + " janela: " + ex + "\r\n"); } catch { }
+                Teste("erro " + ex.Message);
+                MessageBox.Show("Não consegui mostrar a janela do Páginas.\n\n" + ex.Message, "Páginas", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Close();
+            }
+        };
+        tm.Tick += (s, e) =>
         {
-            base.OnPaint(e);
-            using (Pen p = new Pen(Color.FromArgb(230, 220, 203))) e.Graphics.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
+            if (Lancador.mostrar != null && Lancador.mostrar.WaitOne(0)) Trazer();
+            string url = Environment.GetEnvironmentVariable("PAGINAS_URL");
+            if (!entregue && url != null && wv.CoreWebView2 != null)
+            {
+                entregue = true;
+                wv.CoreWebView2.ExecuteScriptAsync("window.pronto ? pronto(" + Js(url) + ") : location.replace(" + Js(url) + ")");
+            }
+            if (!entregue && !Lancador.trabalho.IsAlive && wv.CoreWebView2 != null)
+            {
+                entregue = true;
+                wv.CoreWebView2.ExecuteScriptAsync("window.falha && falha('O Páginas não conseguiu ligar. Feche esta janela e abra de novo. Se continuar, veja o arquivo erro.log na pasta do programa.')");
+            }
+        };
+        tm.Start();
+    }
+
+    static string Js(string s) { return "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""; }
+
+    static void AbrirFora(string uri)
+    {
+        try { Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true }); } catch { }
+    }
+
+    static void Teste(string msg)
+    {
+        string t = Environment.GetEnvironmentVariable("PAGINAS_TESTE");
+        if (string.IsNullOrEmpty(t)) return;
+        try { File.WriteAllText(t + ".janela", msg); } catch { }
+    }
+
+    static bool TemaEscuro()
+    {
+        try
+        {
+            object v = Microsoft.Win32.Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme", 1);
+            return v is int && (int)v == 0;
         }
+        catch { return false; }
+    }
+
+    void Trazer()
+    {
+        if (fechando) return;
+        if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Maximized;
+        Show(); Activate(); BringToFront();
+        TopMost = true; TopMost = false;
+    }
+
+    protected override async void OnFormClosing(FormClosingEventArgs e)
+    {
+        if (fechando) { base.OnFormClosing(e); return; }
+        // guarda a leitura e avisa o programa antes de fechar (ele guarda a cópia no Google Drive e desliga)
+        fechando = true;
+        e.Cancel = true;
+        Hide();
+        try
+        {
+            if (wv.CoreWebView2 != null && carregou)
+            {
+                await wv.CoreWebView2.ExecuteScriptAsync("try{flushReading(true)}catch(e){};try{flushSave()}catch(e){};try{navigator.sendBeacon('/api/bye?t='+API.token)}catch(e){}");
+                await System.Threading.Tasks.Task.Delay(700);
+            }
+        }
+        catch { }
+        Environment.SetEnvironmentVariable("PAGINAS_FECHAR", "1");   // o programa termina, guarda a cópia no Google Drive e desliga
+        Close();
+    }
+}
+
+/// Janela "Abrindo o Páginas…" para quando o Windows não tem o WebView2 (o programa abre no Edge).
+class Abertura : Form
+{
+    readonly DateTime ini = DateTime.Now;
+
+    public Abertura()
+    {
+        Text = "Páginas";
+        Icon = Lancador.Icone();
+        FormBorderStyle = FormBorderStyle.None;
+        StartPosition = FormStartPosition.CenterScreen;
+        Size = new Size(340, 140);
+        BackColor = Color.FromArgb(246, 241, 231);
+        PictureBox img = new PictureBox { Size = new Size(64, 64), Location = new Point(26, 38), SizeMode = PictureBoxSizeMode.Zoom };
+        try { img.Image = Lancador.Icone().ToBitmap(); } catch { }
+        Label t1 = new Label { Text = "Páginas", Font = new Font("Georgia", 18, FontStyle.Bold), ForeColor = Color.FromArgb(180, 83, 42), AutoSize = true, Location = new Point(104, 40) };
+        Label t2 = new Label { Text = "Abrindo sua biblioteca…", Font = new Font("Segoe UI", 10), ForeColor = Color.FromArgb(122, 111, 99), AutoSize = true, Location = new Point(107, 78) };
+        Controls.Add(img); Controls.Add(t1); Controls.Add(t2);
+        System.Windows.Forms.Timer tm = new System.Windows.Forms.Timer { Interval = 150 };
+        tm.Tick += (s, e) =>
+        {
+            bool pronto = Environment.GetEnvironmentVariable("PAGINAS_PRONTO") == "1";
+            if ((pronto && (DateTime.Now - ini).TotalMilliseconds > 900) || !Lancador.trabalho.IsAlive || (DateTime.Now - ini).TotalSeconds > 25) { tm.Stop(); Close(); }
+        };
+        tm.Start();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        using (Pen p = new Pen(Color.FromArgb(230, 220, 203))) e.Graphics.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
     }
 }
