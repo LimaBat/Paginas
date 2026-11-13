@@ -120,7 +120,7 @@ jobs:
           $porta2, $tk2 = (Get-Content $env:PAGINAS_TESTE).Split(' ')
           Invoke-RestMethod "http://127.0.0.1:$porta2/api/notif?t=$tk2" -Method Post -ContentType 'application/json' -Body '{"on":true,"horas":["09:00"]}' | Out-Null
           $acao = (Get-ScheduledTask -TaskName 'Paginas - Reflexoes').Actions[0]
-          if ($acao.Execute -notlike '*Paginas.exe' -or $acao.Arguments -ne '--reflexao') { throw "a tarefa deveria abrir o Paginas.exe --reflexao" }
+          if ($acao.Execute -notlike '*Paginas.exe' -or $acao.Arguments -ne '--reflexao') { throw "a tarefa deveria abrir o Paginas.exe --reflexao, mas abre: [$($acao.Execute)] [$($acao.Arguments)] | log: $(Get-Content "$env:LOCALAPPDATA\Paginas\erro.log" -Raw -ErrorAction SilentlyContinue)" }
           Start-Process -FilePath "$env:LOCALAPPDATA\Paginas\Paginas.exe" -ArgumentList '--reflexao' -Wait
           if (Get-Content "$env:LOCALAPPDATA\Paginas\erro.log" -ErrorAction SilentlyContinue | Select-String 'notificacao|lancador') { Write-Host "::warning::$(Get-Content "$env:LOCALAPPDATA\Paginas\erro.log" -Raw)" } else { Write-Host "reflexao pelo .exe sem erro" }
           Invoke-RestMethod "http://127.0.0.1:$porta2/api/notif?t=$tk2" -Method Post -ContentType 'application/json' -Body '{"on":false}' | Out-Null
