@@ -243,9 +243,11 @@ jobs:
           ANDROID_KEYSTORE_SENHA: ${{ secrets.ANDROID_KEYSTORE_SENHA }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
-          if [ -n "$KEYSTORE_B64" ]; then echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/paginas.keystore"; export ANDROID_KEYSTORE="$RUNNER_TEMP/paginas.keystore"; else echo "::warning::Sem a chave de assinatura (ANDROID_KEYSTORE_BASE64): o APK sai com assinatura de teste e as atualizações vão pedir para desinstalar antes"; fi
+          if [ -n "$KEYSTORE_B64" ]; then echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/paginas.keystore"; export ANDROID_KEYSTORE="$RUNNER_TEMP/paginas.keystore"; elif [ "${{ github.event_name }}" = "release" ]; then echo "::error::Faltam os segredos da chave de assinatura do Android (ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_SENHA, ANDROID_KEY_ALIAS). Sem eles o APK não instala por cima da versão anterior. Veja o LEIA-ME."; exit 1; else echo "::warning::Sem a chave de assinatura (ANDROID_KEYSTORE_BASE64): este APK de teste sai com assinatura de teste"; fi
           bash ferramentas/gradle_com_log.sh -p android assembleRelease -PversaoNome=$VNOME -PversaoCodigo=$VCOD
           cp android/app/build/outputs/apk/release/app-release.apk Paginas.apk
+          AS=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          echo "Assinatura do APK: $("$AS" verify --print-certs Paginas.apk | grep -i 'SHA-256' | head -1)"
           ls -la Paginas.apk
       - uses: actions/upload-artifact@v4
         with:
