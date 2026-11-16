@@ -168,6 +168,12 @@ public class MainActivity extends Activity {
         public void reflexaoAgora() { Reflexoes.mostrar(getApplicationContext()); }
 
         @JavascriptInterface
+        public void agendarLembrete(String cfg) { Reflexoes.agendarLembrete(getApplicationContext(), cfg); }
+
+        @JavascriptInterface
+        public void lembreteAgora() { Reflexoes.lembrete(getApplicationContext(), true); }
+
+        @JavascriptInterface
         public void pedirPermissao() {
             if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
                 runOnUiThread(() -> requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 7));

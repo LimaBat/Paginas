@@ -40,7 +40,8 @@ static class Lancador
     static int Main(string[] args)
     {
         pasta = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Paginas");
-        bool reflexao = args.Length > 0 && args[0] == "--reflexao";
+        bool lembrete = args.Length > 0 && args[0] == "--lembrete";
+        bool reflexao = (args.Length > 0 && args[0] == "--reflexao") || lembrete;  // os dois só mostram um aviso e saem
         Mutex unico = null;
         try
         {
@@ -75,8 +76,8 @@ static class Lancador
 
             if (reflexao)
             {
-                // notificação de reflexão agendada (Ajustes > Reflexões)
-                string ps1 = Path.Combine(pasta, "notificar.ps1");
+                // notificação agendada: reflexão ou lembrete de leitura
+                string ps1 = Path.Combine(pasta, lembrete ? "lembrete.ps1" : "notificar.ps1");
                 if (File.Exists(ps1)) Rodar(File.ReadAllText(ps1, Encoding.UTF8), ps1);
                 return 0;
             }

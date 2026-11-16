@@ -288,7 +288,7 @@ public class Servidor {
                 URI uri;
                 try { uri = new URI(u); } catch (URISyntaxException e) { uri = null; }
                 if (uri == null || uri.getHost() == null || !"https".equals(uri.getScheme())
-                        || !uri.getHost().toLowerCase(Locale.ROOT).matches("([a-z\\-]+\\.wikisource\\.org|archive\\.org)")) {
+                        || !uri.getHost().toLowerCase(Locale.ROOT).matches("([a-z\\-]+\\.wikisource\\.org|archive\\.org|openlibrary\\.org|standardebooks\\.org)")) {
                     enviarJson(out, 400, "{\"error\":\"endereco nao permitido\"}"); break;
                 }
                 enviar(out, 200, "application/json; charset=utf-8", baixarComCache(u, 30 * 60_000L));

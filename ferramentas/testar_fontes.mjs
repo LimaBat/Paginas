@@ -47,5 +47,22 @@ try {
   }
   conf(achou, 'Internet Archive: texto livre baixado');
 } catch (e) { falhas.push('Internet Archive: ' + e.message); }
+try {
+  const j = await json('https://openlibrary.org/search.json?q=' + encodeURIComponent('dom casmurro') + '&has_fulltext=true&fields=key,title,author_name,first_publish_year,ia,ebook_access,cover_i,language,public_scan_b&limit=60');
+  const livres = (j.docs || []).filter(d => (d.ebook_access === 'public' || d.public_scan_b === true) && Array.isArray(d.ia) && d.ia.length);
+  console.log('Open Library:', (j.docs || []).length, 'resultados,', livres.length, 'livres:', livres.slice(0, 4).map(d => d.title + ' [' + d.ia[0] + '] ' + (d.language || []).join('/')).join(' | '));
+  conf(livres.length > 0, 'Open Library acha livros livres');
+} catch (e) { falhas.push('Open Library: ' + e.message); }
+try {
+  const html = await (await get('https://standardebooks.org/ebooks?query=' + encodeURIComponent('pride and prejudice') + '&per-page=24')).text();
+  const cams = [...html.matchAll(/about="\/ebooks\/([a-z0-9\-]+(?:\/[a-z0-9\-]+)+)\/?"/g)].map(m => m[1]);
+  console.log('Standard Ebooks busca:', cams.slice(0, 5).join(' | '), '| tem schema:Book:', /typeof="schema:Book"/.test(html), '| tem class author:', /class="author"/.test(html));
+  conf(cams.length > 0, 'Standard Ebooks: busca');
+  if (cams[0]) {
+    const t = await (await get('https://standardebooks.org/ebooks/' + cams[0] + '/text/single-page')).text();
+    console.log('Standard Ebooks texto:', t.length, t.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(2000, 2300));
+    conf(t.length > 20000, 'Standard Ebooks: livro em página única');
+  }
+} catch (e) { falhas.push('Standard Ebooks: ' + e.message); }
 console.log('\nOK:', ok.join(' · '));
 if (falhas.length) { console.log('FALHAS:', falhas.join(' · ')); process.exitCode = 1; } else console.log('TESTE DAS FONTES OK');

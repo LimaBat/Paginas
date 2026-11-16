@@ -299,6 +299,43 @@ try {
 }
 '@
 
+  # ---- lembrete de leitura (tarefa agendada; so avisa se a pessoa ainda nao leu no dia) ----
+  $LEMB_PS1 = @'
+$ErrorActionPreference = 'Stop'
+try {
+  $d = Split-Path -Parent $MyInvocation.MyCommand.Path
+  $forcar = $env:PAGINAS_LEMB_TESTE -eq '1'
+  $i = $null
+  $arq = Join-Path $d 'dados.json'
+  if (Test-Path -LiteralPath $arq) { try { $i = ([IO.File]::ReadAllText($arq, [Text.Encoding]::UTF8) | ConvertFrom-Json).lembInfo } catch { } }
+  $hoje = (Get-Date).ToString('yyyy-MM-dd')
+  $ontem = (Get-Date).AddDays(-1).ToString('yyyy-MM-dd')
+  $feito = ''; if ($i) { $feito = [string]$i.feito }
+  if (-not $forcar -and $feito -eq $hoje) { return }
+  $seq = 0; if ($i -and $i.seq) { $seq = [int]$i.seq }
+  $meta = '15'; if ($i -and $i.meta) { $meta = [string]$i.meta }
+  $un = 'minutos'; if ($i -and $i.un) { $un = [string]$i.un }
+  if ($seq -gt 0 -and $feito -eq $ontem) {
+    $dias = ' dias'; if ($seq -eq 1) { $dias = ' dia' }
+    $tit = 'Sua sequência de ' + $seq + $dias + ' está esperando ' + [char]::ConvertFromUtf32(0x1F525)
+    $txt = 'Leia ' + $meta + ' ' + $un + ' hoje para não perder o fogo.'
+  } else {
+    $tit = 'Hora de ler ' + [char]::ConvertFromUtf32(0x1F4D6)
+    $txt = 'Que tal ' + $meta + ' ' + $un + ' de leitura agora? Um pouquinho por dia vira hábito.'
+  }
+  if ($i -and $i.livro) { $txt += ' Continue ' + [char]0x201C + [string]$i.livro + [char]0x201D + '.' }
+  $ico = (Join-Path $d 'icone.png') -replace '\\', '/'
+  [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+  [void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+  $x = New-Object Windows.Data.Xml.Dom.XmlDocument
+  $x.LoadXml('<toast><visual><binding template="ToastGeneric"><image placement="appLogoOverride" hint-crop="circle" src="file:///' + $ico + '"/><text>' + [Security.SecurityElement]::Escape($tit) + '</text><text>' + [Security.SecurityElement]::Escape($txt) + '</text></binding></visual></toast>')
+  $app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+  [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show((New-Object Windows.UI.Notifications.ToastNotification $x))
+} catch {
+  [IO.File]::AppendAllText((Join-Path $env:LOCALAPPDATA 'Paginas\erro.log'), ((Get-Date).ToString('s') + ' lembrete: ' + $_.Exception.Message + "`r`n"))
+}
+'@
+
   # ---- conta Google (fluxo de "app para computador" com PKCE, igual ao Investe.AI) e copia dos dados no Google Drive ----
   $G_AUTH = 'https://accounts.google.com/o/oauth2/v2/auth'
   $G_TOKEN = 'https://oauth2.googleapis.com/token'
@@ -465,6 +502,27 @@ try {
       }
       Send-Json $ctx 200 '{"ok":true}'
     }
+    elseif ($path -eq '/api/lembrete' -and $req.HttpMethod -eq 'POST') {
+      $in = (Read-Body $req) | ConvertFrom-Json
+      $nomeTarefa = 'Paginas - Lembrete de leitura'
+      $ps1 = Join-Path $dir 'lembrete.ps1'
+      $vbsL = Join-Path $dir 'lembrete.vbs'
+      [IO.File]::WriteAllText($ps1, $LEMB_PS1, (New-Object System.Text.UTF8Encoding($true)))
+      if ($PGEXE) { if (Test-Path -LiteralPath $vbsL) { Remove-Item -LiteralPath $vbsL -Force } }
+      else {
+        $vbsTxt = 'CreateObject("WScript.Shell").Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""' + $ps1 + '""", 0, False' + "`r`n"
+        [IO.File]::WriteAllText($vbsL, $vbsTxt, [Text.Encoding]::Unicode)
+      }
+      try { Unregister-ScheduledTask -TaskName $nomeTarefa -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+      if ($in.on -and ([string]$in.hora -match '^\d{1,2}:\d{2}$')) {
+        $gat = New-ScheduledTaskTrigger -Daily -At ([datetime]::ParseExact([string]$in.hora, 'H:mm', $null))
+        if ($PGEXE) { $acao = New-ScheduledTaskAction -Execute $PGEXE -Argument '--lembrete' }
+        else { $acao = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\wscript.exe') -Argument ('"' + $vbsL + '"') }
+        $cfgT = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+        [void](Register-ScheduledTask -TaskName $nomeTarefa -Action $acao -Trigger $gat -Settings $cfgT -Description 'Lembrete de leitura do Paginas' -Force)
+      }
+      Send-Json $ctx 200 '{"ok":true}'
+    }
     elseif ($path -eq '/api/notif/teste' -and $req.HttpMethod -eq 'POST') {
       $ps1 = Join-Path $dir 'notificar.ps1'
       [IO.File]::WriteAllText($ps1, $NOTIF_PS1, (New-Object System.Text.UTF8Encoding($true)))
@@ -572,7 +630,7 @@ try {
       # buscas nas bibliotecas abertas (só estes sites)
       $u = [string]$q['u']
       $uri = $null
-      if (-not [Uri]::TryCreate($u, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or ($uri.Host -notmatch '^([a-z\-]+\.wikisource\.org|archive\.org)$')) {
+      if (-not [Uri]::TryCreate($u, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or ($uri.Host -notmatch '^([a-z\-]+\.wikisource\.org|archive\.org|openlibrary\.org|standardebooks\.org)$')) {
         Send-Json $ctx 400 '{"error":"endereco nao permitido"}'; return
       }
       $hit = $cache[$u]
@@ -924,6 +982,7 @@ html.escuro{background:#1b1815}
     <div class="brand">Páginas</div>
     <nav>
       <button class="tab" data-v="today" data-a="nav">Hoje</button>
+      <button class="tab" data-v="trilha" data-a="nav">Trilha</button>
       <button class="tab" data-v="foryou" data-a="nav">Para você</button>
       <button class="tab" data-v="social" data-a="nav">Comunidade</button>
       <button class="tab" data-v="library" data-a="nav">Pesquisar</button>
@@ -1102,6 +1161,7 @@ function notify() {
 }
 setInterval(() => {
   const t = state.settings.reminder; if (!t) return;
+  if (state.settings.lembAplicado === t) return; // o aviso do sistema (com o app fechado) já cuida disso
   const n = new Date();
   if (`${pad(n.getHours())}:${pad(n.getMinutes())}` === t && lastNotified !== todayStr() && !isDone(todayStr())) {
     lastNotified = todayStr(); notify();
@@ -1275,7 +1335,7 @@ function renderSettings() {
       <label>Dias de descanso por semana<input type="number" min="0" max="3" data-set="restPerWeek" value="${s.restPerWeek}"></label>
       <label>Lembrete diário<input type="time" data-set="reminder" value="${esc(s.reminder)}"></label>
     </div>
-    <p class="muted small">Dica: comece com uma meta pequena (10 a 15 minutos). Constância vale mais que volume. O lembrete só dispara com o programa aberto.</p>
+    <p class="muted small">Dica: comece com uma meta pequena (10 a 15 minutos). Constância vale mais que volume. No aplicativo do Windows e no celular, o lembrete chega mesmo com o Páginas fechado (só se você ainda não leu no dia).</p>
   </section>
   <section class="card">
     <h2>Seus dados</h2>
@@ -1552,8 +1612,9 @@ async function fetchList(params) {
 const WS_LANGS = { pt: 1, en: 1, es: 1, fr: 1, it: 1, de: 1 };
 const IA_LANG = { pt: 'por', en: 'eng', es: 'spa', fr: 'fre', it: 'ita', de: 'ger' };
 const IA_LANG_VOLTA = { por: 'pt', portuguese: 'pt', eng: 'en', english: 'en', spa: 'es', spanish: 'es', fre: 'fr', fra: 'fr', french: 'fr', ita: 'it', italian: 'it', ger: 'de', deu: 'de', german: 'de' };
-const FONTE_NOME = { wikisource: 'Wikisource', archive: 'Internet Archive', '': 'Gutenberg' };
+const FONTE_NOME = { wikisource: 'Wikisource', archive: 'Internet Archive', openlibrary: 'Open Library', standard: 'Standard Ebooks', '': 'Gutenberg' };
 async function remoto(url) { return (await api('/api/remote?u=' + encodeURIComponent(url))).json(); }
+async function remotoTexto(url) { return (await api('/api/remote?u=' + encodeURIComponent(url))).text(); }
 function langsBusca() {
   const l = lib.lang === 'mine' ? userLangs() : (lib.lang ? [lib.lang] : ['pt', 'en', 'es']);
   return l.length ? l : ['pt'];
@@ -1605,9 +1666,63 @@ async function buscaArchive(q, langs) {
     GCACHE[b.gid] = b; return b;
   });
 }
+/* Open Library: catálogo enorme; só entram os livros com o escaneamento livre (domínio público) no Internet Archive */
+async function buscaOpenLibrary(q, langs) {
+  const limpo = q.replace(/[()[\]{}:"\\/^~*?!+]/g, ' ').trim();
+  if (!limpo) return [];
+  const L = new Set(langs.map(l => IA_LANG[l]).filter(Boolean).concat(langs.includes('fr') ? ['fra'] : [], langs.includes('de') ? ['deu'] : []));
+  const u = 'https://openlibrary.org/search.json?q=' + encodeURIComponent(limpo) +
+    '&has_fulltext=true&fields=key,title,author_name,first_publish_year,ia,ebook_access,cover_i,language,public_scan_b&limit=60';
+  const j = await remoto(u);
+  const out = [];
+  for (const d of (j.docs || [])) {
+    const livre = d.ebook_access === 'public' || d.public_scan_b === true;
+    if (!livre || !Array.isArray(d.ia) || !d.ia.length || !d.title) continue;
+    const lg = (d.language || []).find(x => L.has(x)) || '';
+    if (L.size && d.language && d.language.length && !lg) continue;
+    const b = { gid: 'ia:' + d.ia[0], title: d.title, author: (d.author_name || []).slice(0, 2).join(', '), lang: IA_LANG_VOLTA[lg] || '', downloads: 0, textUrl: '',
+      cover: d.cover_i ? 'https://covers.openlibrary.org/b/id/' + d.cover_i + '-M.jpg' : 'https://archive.org/services/img/' + encodeURIComponent(d.ia[0]),
+      fonte: 'archive', rotulo: 'openlibrary', ia: d.ia[0], ano: d.first_publish_year || '' };
+    if (!GCACHE[b.gid] || !GCACHE[b.gid].fonte) GCACHE[b.gid] = b;
+    out.push(b);
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+/* Standard Ebooks: clássicos em inglês revisados com muito cuidado (texto limpo, sem erros de digitalização) */
+async function buscaStandard(q, langs) {
+  if (!langs.includes('en')) return [];
+  const html = await remotoTexto('https://standardebooks.org/ebooks?query=' + encodeURIComponent(q.trim()) + '&per-page=24');
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const out = [], vistos = new Set();
+  doc.querySelectorAll('[typeof="schema:Book"][about^="/ebooks/"], li[about^="/ebooks/"]').forEach(li => {
+    const cam = li.getAttribute('about').replace(/^\/ebooks\//, '').replace(/\/+$/, '');
+    if (!cam || vistos.has(cam) || !/^[a-z0-9\-]+(\/[a-z0-9\-]+)+$/.test(cam)) return;
+    vistos.add(cam);
+    const nome = li.querySelector('[property="schema:name"]');
+    const aut = li.querySelector('.author [property="schema:name"], .author, [property="schema:author"]');
+    const img = li.querySelector('img');
+    let capa = img ? (img.getAttribute('src') || '') : '';
+    if (capa && capa.startsWith('/')) capa = 'https://standardebooks.org' + capa;
+    const b = { gid: 'se:' + cam.replace(/\//g, '.'), title: nome ? nome.textContent.trim() : cam.split('/').pop().replace(/-/g, ' '), author: aut ? aut.textContent.trim().replace(/\s+/g, ' ') : '',
+      lang: 'en', downloads: 0, textUrl: '', cover: /^https:\/\/standardebooks\.org\//.test(capa) ? capa : '', fonte: 'standard', se: cam };
+    GCACHE[b.gid] = b; out.push(b);
+  });
+  return out;
+}
+async function textoStandard(cam) {
+  const html = await remotoTexto('https://standardebooks.org/ebooks/' + cam + '/text/single-page');
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  doc.querySelectorAll('[epub\\:type~="titlepage"], [epub\\:type~="imprint"], [epub\\:type~="colophon"], [epub\\:type~="copyright-page"], [epub\\:type~="loi"], nav, header').forEach(e => e.remove());
+  const raiz = doc.querySelector('main') || doc.body;
+  return htmlParaTexto(raiz);
+}
 async function buscaExtras(q, langs) {
-  const [ws, ia] = await Promise.all([buscaWikisource(q, langs).catch(() => null), buscaArchive(q, langs).catch(() => null)]);
-  return { ws, ia };
+  const [ws, ia, ol, se] = await Promise.all([buscaWikisource(q, langs).catch(() => null), buscaArchive(q, langs).catch(() => null),
+    buscaOpenLibrary(q, langs).catch(() => null), buscaStandard(q, langs).catch(() => null)]);
+  // o mesmo livro do Internet Archive não aparece duas vezes
+  const jaIA = new Set((ia || []).map(b => b.gid));
+  return { ws, ia, ol: ol && ol.filter(b => !jaIA.has(b.gid)), se };
 }
 
 /* texto completo de um livro da Wikisource: junta os capítulos na ordem do sumário */
@@ -1680,6 +1795,12 @@ async function textoDoLivro(b, aviso) {
   if (b.fonte === 'wikisource') {
     const t = await textoWikisource(b.ws, aviso);
     if (!t || t.length < 300) throw new Error('A Wikisource não trouxe o texto deste livro.');
+    try { await api('/api/book?gid=' + encodeURIComponent(b.gid), { method: 'POST', headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: t }); } catch (e) {}
+    return t;
+  }
+  if (b.fonte === 'standard') {
+    const t = await textoStandard(b.se || String(b.gid).slice(3).replace(/\./g, '/'));
+    if (!t || t.length < 300) throw new Error('A Standard Ebooks não trouxe o texto deste livro.');
     try { await api('/api/book?gid=' + encodeURIComponent(b.gid), { method: 'POST', headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: t }); } catch (e) {}
     return t;
   }
@@ -1781,7 +1902,7 @@ function addToShelf(g, status) {
   let b = shelfBook(g.gid);
   if (b) return b;
   b = { id: 'g' + g.gid, gid: g.gid, title: g.title, author: g.author, totalPages: 0, currentPage: 0, rp: 0,
-    status, addedAt: new Date().toISOString(), finishedAt: null, rating: 0, note: '', textUrl: g.textUrl, lang: g.lang, fonte: g.fonte || undefined, ws: g.ws || undefined, ia: g.ia || undefined, cover: g.cover || undefined };
+    status, addedAt: new Date().toISOString(), finishedAt: null, rating: 0, note: '', textUrl: g.textUrl, lang: g.lang, fonte: g.fonte || undefined, ws: g.ws || undefined, ia: g.ia || undefined, se: g.se || undefined, cover: g.cover || undefined };
   state.books.push(b);
   return b;
 }
@@ -2046,32 +2167,45 @@ setInterval(() => {
 ['keydown', 'click', 'mousemove', 'wheel', 'scroll'].forEach(ev => document.addEventListener(ev, () => { if (R) R.lastAct = Date.now(); }, true));
 
 /* ---------- tela inicial de gostos ---------- */
-let onb = { step: 0, name: '', genres: [], langs: ['pt'], goal: 15 };
+let onb = { step: 0, name: '', genres: [], langs: ['pt'], goal: 15, freq: -1, conf: -1, plano: true, planoMexeu: false, lemb: '20:00' };
 function renderOnb() {
   const s = onb.step;
-  let h = `<div class="onbbox"><div class="onbbrand">Páginas</div><div class="onbdots">${[0, 1, 2].map(i => `<i class="${i <= s ? 'on' : ''}"></i>`).join('')}</div>`;
+  let h = `<div class="onbbox"><div class="onbbrand">Páginas</div><div class="onbdots">${[0, 1, 2, 3].map(i => `<i class="${i <= s ? 'on' : ''}"></i>`).join('')}</div>`;
   if (s === 0) {
     h += `<h1>Bem-vindo(a)!</h1><p>Vamos montar uma biblioteca com a sua cara. Leva menos de um minuto e você pode mudar tudo depois.</p>
       <label>Como posso te chamar? (opcional)<input id="onbName" data-xin="onbname" maxlength="40" value="${esc(onb.name)}"></label>`;
   } else if (s === 1) {
+    const ch = (campo, l) => l.map(([v, t]) => `<button class="gchip ${onb[campo] === v ? 'on' : ''}" data-x="onbhab" data-v="${campo}" data-id="${v}">${t}</button>`).join('');
+    h += `<h1>Como está a sua leitura hoje?</h1><p class="muted">Sem resposta certa: é só para o Páginas começar no ritmo certo para você.</p>
+      <p style="margin:1rem 0 .4rem"><b>Com que frequência você lê?</b></p>
+      <div class="gchips">${ch('freq', [[0, 'Não leio ou quase nunca'], [1, 'Algumas vezes por mês'], [2, 'Algumas vezes por semana'], [3, 'Todo dia']])}</div>
+      <p style="margin:1.2rem 0 .4rem"><b>Como você se sente lendo um livro?</b></p>
+      <div class="gchips">${ch('conf', [[0, 'Me canso rápido ou acho difícil'], [1, 'Leio tranquilo livros simples'], [2, 'Encaro clássicos e textos longos']])}</div>
+      <label class="onbplano"><input type="checkbox" data-x="onbplano" ${onb.plano ? 'checked' : ''}><span><b>🧭 Quero uma Trilha do Leitor</b><br><small class="muted">Livros fáceis e curtos no começo, ficando mais ricos aos poucos, no seu ritmo. Fica numa aba própria.</small></span></label>`;
+  } else if (s === 2) {
     h += `<h1>Do que você gosta de ler?</h1><p class="muted">Escolha quantos quiser. Isso define as sugestões da aba “Para você”.</p>
       <div class="gchips">${GENRES.map(g => `<button class="gchip ${onb.genres.includes(g.id) ? 'on' : ''}" data-x="onbgenre" data-id="${g.id}">${esc(g.label)}</button>`).join('')}</div>`;
   } else {
     h += `<h1>Últimos detalhes</h1><p class="muted">Em quais idiomas você lê?</p>
       <div class="gchips">${LANGS.map(l => `<button class="gchip ${onb.langs.includes(l.id) ? 'on' : ''}" data-x="onblang" data-id="${l.id}">${esc(l.label)}</button>`).join('')}</div>
       <p class="muted" style="margin-top:1.4rem">Quanto tempo por dia você quer ler? Comece pequeno: o hábito vale mais que o volume.</p>
-      <div class="gchips">${[5, 10, 15, 20, 30].map(m => `<button class="gchip ${onb.goal === m ? 'on' : ''}" data-x="onbgoal" data-id="${m}">${m} min</button>`).join('')}</div>`;
+      <div class="gchips">${[5, 10, 15, 20, 30].map(m => `<button class="gchip ${onb.goal === m ? 'on' : ''}" data-x="onbgoal" data-id="${m}">${m} min</button>`).join('')}</div>
+      <p class="muted" style="margin-top:1.4rem">Quer um lembrete para ler? Ele chega mesmo com o Páginas fechado e só aparece se você ainda não leu no dia.</p>
+      <div class="gchips">${[['', 'Sem lembrete'], ['08:00', '08:00'], ['12:30', '12:30'], ['19:00', '19:00'], ['20:00', '20:00'], ['22:00', '22:00']].map(([v, t]) => `<button class="gchip ${onb.lemb === v ? 'on' : ''}" data-x="onblemb" data-id="${v}">${t}</button>`).join('')}</div>`;
   }
   h += `<div class="onbact"><div>${s > 0 ? '<button class="btn" data-x="onbback">Voltar</button>' : '<button class="btn" data-x="onbskip">Pular</button>'}</div>
-    <button class="btn primary" data-x="onbnext">${s === 2 ? 'Concluir' : 'Continuar'}</button></div></div>`;
+    <button class="btn primary" data-x="onbnext">${s === 3 ? 'Concluir' : 'Continuar'}</button></div></div>`;
   return h;
 }
 function finishOnb() {
   state.profile = { name: onb.name.trim(), genres: onb.genres.slice(), langs: onb.langs.length ? onb.langs.slice() : ['pt'], createdAt: todayStr() };
   state.settings.goalType = 'minutes'; state.settings.dailyGoal = onb.goal;
+  state.settings.reminder = onb.lemb || '';
   rec.status = 'idle'; rec.sections = []; rec.seed = 0;
   lib.started = false; lib.items = [];
   view = 'foryou';
+  if (typeof trilhaDoOnb === 'function') trilhaDoOnb(onb);
+  if (typeof aplicaLembrete === 'function') setTimeout(() => aplicaLembrete(false), 500);
   commit();
 }
 
@@ -2110,17 +2244,28 @@ document.addEventListener('click', e => {
     case 'recrefresh': rec.seed++; loadRec(); break;
     case 'retake':
       onb = { step: 0, name: (state.profile && state.profile.name) || '', genres: ((state.profile && state.profile.genres) || []).slice(),
-        langs: ((state.profile && state.profile.langs) || ['pt']).slice(), goal: state.settings.dailyGoal || 15 };
+        langs: ((state.profile && state.profile.langs) || ['pt']).slice(), goal: state.settings.dailyGoal || 15,
+        freq: state.trilha && state.trilha.resp ? state.trilha.resp.freq : -1, conf: state.trilha && state.trilha.resp ? state.trilha.resp.conf : -1,
+        plano: !!(state.trilha && state.trilha.on), planoMexeu: !!state.trilha, lemb: state.settings.reminder || '' };
       state.profile = null; commit(); break;
     case 'onbgenre': onb.genres = onb.genres.includes(id) ? onb.genres.filter(g => g !== id) : onb.genres.concat(id); redrawOnb(); break;
     case 'onblang': onb.langs = onb.langs.includes(id) ? onb.langs.filter(g => g !== id) : onb.langs.concat(id); redrawOnb(); break;
     case 'onbgoal': onb.goal = Number(id); redrawOnb(); break;
     case 'onbback': onb.step = Math.max(0, onb.step - 1); redrawOnb(); break;
     case 'onbskip': onb.genres = []; finishOnb(); break;
+    case 'onbhab': {
+      onb[v] = Number(id);
+      if (v === 'freq' && !onb.planoMexeu) onb.plano = Number(id) <= 1;
+      if (v === 'freq' && Number(id) === 0 && onb.goal > 10) onb.goal = 5;
+      redrawOnb(); break;
+    }
+    case 'onbplano': onb.plano = el.checked; onb.planoMexeu = true; break;
+    case 'onblemb': onb.lemb = id || ''; redrawOnb(); break;
     case 'onbnext':
-      if (onb.step === 1 && !onb.genres.length) { toast('Escolha pelo menos um gênero (ou volte e toque em Pular).'); break; }
-      if (onb.step === 2 && !onb.langs.length) { toast('Escolha pelo menos um idioma.'); break; }
-      if (onb.step < 2) { onb.step++; redrawOnb(); } else finishOnb();
+      if (onb.step === 1 && (onb.freq < 0 || onb.conf < 0)) { toast('Responda as duas perguntas (ou volte e toque em Pular).'); break; }
+      if (onb.step === 2 && !onb.genres.length) { toast('Escolha pelo menos um gênero (ou volte e toque em Pular).'); break; }
+      if (onb.step === 3 && !onb.langs.length) { toast('Escolha pelo menos um idioma.'); break; }
+      if (onb.step < 3) { onb.step++; redrawOnb(); } else finishOnb();
       break;
     case 'rclose': closeReader(); break;
     case 'rprev': if (R) goPage(R.idx - 1); break;
@@ -2422,9 +2567,9 @@ function searchFor(q, langs) {
 }
 function resRow(g) {
   const tit = ortoLigada() && g.lang === 'pt' ? modernizar(g.title) : g.title;
-  const capa = g.fonte === 'archive' && g.cover ? `<div class="cover"><img src="${esc(g.cover)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()"><span>${esc(tit)}</span></div>` : coverHtml(g);
-  const info = g.fonte ? esc(FONTE_NOME[g.fonte]) + (g.ano ? ' · ' + esc(String(g.ano)) : '') : (g.downloads || 0).toLocaleString('pt-BR') + ' downloads';
-  return `<article class="srow">${capa}<div style="min-width:0"><h4>${esc(tit)}</h4><div class="muted">${esc(g.author || '')}${g.lang ? `<span class="tag">${esc(g.lang.toUpperCase())}</span>` : ''}${g.fonte ? `<span class="tag fonte">${esc(FONTE_NOME[g.fonte])}</span>` : ''}</div><div class="muted">${info}</div><div class="bookact">${tileAct(g)}</div></div></article>`;
+  const capa = g.fonte && g.cover ? `<div class="cover"><img src="${esc(g.cover)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()"><span>${esc(tit)}</span></div>` : coverHtml(g);
+  const info = g.fonte ? esc(FONTE_NOME[g.rotulo || g.fonte]) + (g.ano ? ' · ' + esc(String(g.ano)) : '') : (g.downloads || 0).toLocaleString('pt-BR') + ' downloads';
+  return `<article class="srow">${capa}<div style="min-width:0"><h4>${esc(tit)}</h4><div class="muted">${esc(g.author || '')}${g.lang ? `<span class="tag">${esc(g.lang.toUpperCase())}</span>` : ''}${g.fonte ? `<span class="tag fonte">${esc(FONTE_NOME[g.rotulo || g.fonte])}</span>` : ''}</div><div class="muted">${info}</div><div class="bookact">${tileAct(g)}</div></div></article>`;
 }
 function libResults() {
   ensure();
@@ -2441,7 +2586,9 @@ function libResults() {
   ${!lib.loading && !lib.error && !lib.items.length ? `<div class="card empty">${q ? 'Nada com essa busca no Projeto Gutenberg.' : 'Nenhum livro encontrado. Tente outro título, o sobrenome do autor ou outro idioma.'}</div>` : ''}
   ${lib.hasMore && !lib.loading ? '<p class="center"><button class="btn" data-x="libmore">Carregar mais</button></p>' : ''}
   ${q ? extraRows('📜 Na Wikisource', 'Textos revisados por voluntários, com muitos clássicos brasileiros e portugueses.', lib.extra && lib.extra.ws) +
-    extraRows('🏛️ No Internet Archive', 'Livros digitalizados de bibliotecas do mundo todo. O texto vem do escaneamento das páginas e pode ter pequenos erros.', lib.extra && lib.extra.ia) : ''}`;
+    extraRows('🏛️ No Internet Archive', 'Livros digitalizados de bibliotecas do mundo todo. O texto vem do escaneamento das páginas e pode ter pequenos erros.', lib.extra && lib.extra.ia) +
+    extraRows('📚 Na Open Library', 'Catálogo de milhões de livros; aqui aparecem só os de domínio público, com o escaneamento livre para ler.', lib.extra && lib.extra.ol) +
+    (langsBusca().includes('en') ? extraRows('✒️ Na Standard Ebooks', 'Clássicos em inglês revisados um a um, com texto limpo e bonito.', lib.extra && lib.extra.se) : '') : ''}`;
 }
 function extraRows(tit, desc, l) {
   if (lib.extraLoading) return `<h3 class="sechead">${tit}</h3><p class="empty">Procurando…</p>`;
@@ -2620,9 +2767,9 @@ function cv(g) {
 coverHtml = cv;
 tile = function (g) {
   const tit = ortoLigada() && g.lang === 'pt' ? modernizar(g.title) : g.title;
-  const capa = g.fonte === 'archive' && g.cover ? `<div class="cover"><img src="${esc(g.cover)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()"><span>${esc(tit)}</span></div>` : cv(g);
+  const capa = g.fonte && g.cover ? `<div class="cover"><img src="${esc(g.cover)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()"><span>${esc(tit)}</span></div>` : cv(g);
   return `<article class="tile">${capa}<div class="tt" title="${esc(tit)}">${esc(tit)}</div>
-    <div class="au">${esc(g.author)}${g.lang ? `<span class="tag">${esc(g.lang.toUpperCase())}</span>` : ''}${g.fonte ? `<span class="tag fonte">${esc(FONTE_NOME[g.fonte])}</span>` : ''}</div><div class="tact">${tileAct(g)}</div></article>`;
+    <div class="au">${esc(g.author)}${g.lang ? `<span class="tag">${esc(g.lang.toUpperCase())}</span>` : ''}${g.fonte ? `<span class="tag fonte">${esc(FONTE_NOME[g.rotulo || g.fonte])}</span>` : ''}</div><div class="tact">${tileAct(g)}</div></article>`;
 };
 const _bookCard = bookCard;
 bookCard = function (b) {
@@ -2703,6 +2850,26 @@ render();
 </script>
 <style>
 .brgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,430px),1fr));gap:1rem}
+.trc.feito{opacity:.72}
+.trok{font-size:.82rem;font-weight:700;color:#3f8f55}
+.trhead .trtop{display:flex;gap:.9rem;align-items:center}
+.tremoji{font-size:2.2rem;width:3.4rem;height:3.4rem;flex:none;display:grid;place-items:center;border-radius:16px;background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.trescada{display:grid;grid-template-columns:repeat(6,1fr);gap:.35rem;margin:1rem 0 .8rem}
+.trd{display:flex;flex-direction:column;align-items:center;gap:.2rem;text-align:center;padding:.45rem .2rem;border-radius:12px;background:color-mix(in srgb,var(--ink) 5%,transparent);opacity:.55}
+.trd span{font-size:1.15rem}.trd small{font-size:.62rem;line-height:1.15}
+.trd.ok{opacity:.9}.trd.ok span{color:#3f8f55;font-weight:800}
+.trd.on{opacity:1;background:color-mix(in srgb,var(--accent) 18%,transparent);outline:2px solid var(--accent)}
+.trnums{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin:.4rem 0 .6rem}
+.trnums div{display:flex;flex-direction:column;padding:.55rem .7rem;border-radius:12px;background:color-mix(in srgb,var(--ink) 5%,transparent)}
+.trnums small{color:var(--muted);font-size:.74rem}
+.trsug{margin-top:.8rem;padding:.7rem .8rem;border-radius:12px;background:color-mix(in srgb,var(--accent) 12%,transparent);display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
+.trprox{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.5rem}
+.trprox div{display:flex;flex-direction:column;padding:.6rem .8rem;border-radius:12px;border:1px dashed color-mix(in srgb,var(--ink) 25%,transparent);opacity:.75}
+.trprox small{color:var(--muted)}
+.trmini{display:flex;gap:.9rem;align-items:flex-start}
+.onbplano{display:flex!important;flex-direction:row!important;gap:.7rem;align-items:flex-start;margin-top:1.4rem;padding:.8rem;border-radius:14px;background:color-mix(in srgb,var(--accent) 10%,transparent);cursor:pointer;text-align:left}
+.onbplano input{width:1.2rem;height:1.2rem;flex:none;margin-top:.15rem;accent-color:var(--accent)}
+@media(max-width:560px){.trd small{display:none}}
 .brc{display:flex;gap:1rem;padding:1rem;margin:0}
 .brc .cover{width:96px;flex:none;margin:0;font-size:.64rem}
 .brc .brm{min-width:0;display:flex;flex-direction:column}
@@ -2805,7 +2972,8 @@ h1,h2,h3,.brand,.big,.ringtxt b,.stat b,.onbbrand,.pquote p,.cfb b,.cover,.rbody
 .hl.has{border-bottom:2px solid var(--accent)}
 .reader.th-dark .hl{background:rgba(255,213,79,.28)}
 @keyframes sheet{from{opacity:0;transform:translate(-50%,16px)}}
-.rtool{position:fixed;z-index:70;display:flex;gap:.2rem;background:#2a2420;color:#fff;border-radius:12px;padding:.3rem;box-shadow:0 12px 28px -8px rgba(0,0,0,.55);animation:pop .25s var(--ease)}
+.rtool{position:fixed;z-index:70;left:50%;transform:translateX(-50%);bottom:84px;width:max-content;max-width:calc(100vw - 16px);flex-wrap:wrap;justify-content:center;display:flex;gap:.2rem;background:#2a2420;color:#fff;border-radius:12px;padding:.3rem;box-shadow:0 12px 28px -8px rgba(0,0,0,.55);animation:rtsobe .22s var(--ease)}
+@keyframes rtsobe{from{opacity:0;transform:translate(-50%,14px)}to{opacity:1;transform:translate(-50%,0)}}
 .rtool button{background:none;border:0;color:#fff;font:inherit;font-size:.88rem;font-weight:600;padding:.4rem .7rem;border-radius:8px;cursor:pointer}
 .rtool button:hover{background:rgba(255,255,255,.16)}
 .hpanel{position:absolute;left:50%;bottom:4.6rem;transform:translateX(-50%);width:min(640px,94vw);max-height:55vh;overflow:auto;z-index:60;background:var(--rbg);color:var(--rink);border:1px solid var(--rline);border-radius:16px;padding:1rem 1.1rem;box-shadow:0 20px 44px -12px rgba(0,0,0,.5);animation:sheet .28s var(--ease)}
@@ -2896,12 +3064,12 @@ function hideTool() { const el = $('#rtool'); if (el) el.remove(); }
 function clearSel() { const s = getSelection(); if (s) s.removeAllRanges(); hideTool(); }
 function showTool(sel) {
   hideTool();
-  const w = 230, rc = sel.rect;
-  const left = Math.max(8, Math.min(innerWidth - w - 8, rc.left + rc.width / 2 - w / 2));
-  let top = rc.top - 52; if (top < 56) top = rc.bottom + 10;
+  // fica presa embaixo, logo acima da barra de páginas, para não ficar sob o menu do próprio celular
+  const ft = $('#reader .rfoot');
+  const base = ft ? Math.max(0, innerHeight - ft.getBoundingClientRect().top) : 0;
   const el = document.createElement('div');
   el.id = 'rtool'; el.className = 'rtool';
-  el.style.left = left + 'px'; el.style.top = top + 'px';
+  el.style.bottom = (base + 12) + 'px';
   el.setAttribute('onmousedown', 'event.preventDefault()');
   el.innerHTML = '<button data-x="hlmark">🖍 Grifar</button><button data-x="hlexplain">✨ Significado</button>';
   $('#reader').appendChild(el);
@@ -3043,6 +3211,13 @@ function mesclar(a, c) {
   g.tutVisto = ga.tutVisto || gc.tutVisto; g.iniciado = ga.iniciado || gc.iniciado;
   g.nivel = Math.max(ga.nivel || 0, gc.nivel || 0) || undefined;
   out.game = g;
+  // trilha do leitor: degrau do aparelho que mudou por último, livros lidos de todos
+  if (a.trilha || c.trilha) {
+    const ta = a.trilha || {}, tc = c.trilha || {};
+    out.trilha = Object.assign({}, cNovo ? ta : tc, cNovo ? tc : ta);
+    out.trilha.feitos = Object.assign({}, tc.feitos || {}, ta.feitos || {});
+    out.trilha.gids = Object.assign({}, tc.gids || {}, ta.gids || {});
+  }
   out.mod = Math.max(a.mod || 0, c.mod || 0);
   return out;
 }
@@ -3505,7 +3680,7 @@ function celebra() {
   el.id = 'cel'; el.className = 'cel';
   const cores = ['#e08a5c', '#e0b04a', '#7bc08a', '#6aa6e0', '#c47bd6'];
   const conf = Array.from({ length: 28 }, (_, i) => `<i style="left:${(i * 37) % 100}%;background:${cores[i % 5]};animation-delay:${(i % 7) * 0.08}s;--r:${(i * 53) % 360}deg"></i>`).join('');
-  const rot = { conq: 'Conquista desbloqueada', missao: 'Missão diária', bau: 'Recompensa', nivel: 'Você subiu de nível' }[c.tipo];
+  const rot = { conq: 'Conquista desbloqueada', missao: 'Missão diária', bau: 'Recompensa', nivel: 'Você subiu de nível', trilha: 'Trilha do Leitor' }[c.tipo];
   el.innerHTML = `<div class="celconf">${conf}</div><div class="celbox"><small>${rot}</small><div class="cele">${c.e}</div><h2>${esc(c.nome)}</h2><p>${esc(c.desc)}</p>${c.xp ? `<b class="celxp">+${c.xp} XP</b>` : ''}
     <div class="bookact" style="justify-content:center">${c.tipo === 'conq' && SOC.token ? '<button class="btn" data-g="celshare">Compartilhar</button>' : ''}<button class="btn primary" data-g="celok">Continuar</button></div></div>`;
   el.dataset.nome = c.nome; el.dataset.e = c.e;
@@ -3571,6 +3746,7 @@ const TUT_PASSOS = [
   { t: 'Bem-vindo(a) ao Páginas! 📖', x: 'Em 1 minuto eu te mostro onde fica cada coisa. Você pode pular quando quiser e rever em Ajustes.' },
   { sel: '.tab[data-v=today]', v: 'today', t: 'Hoje', x: 'Sua meta do dia, a sequência de dias seguidos 🔥 e o cronômetro. Leia um pouco todo dia para não perder a sequência.' },
   { sel: '#jogo', v: 'today', t: 'Nível, XP e missões', x: 'Cada minuto lido dá XP e sobe o seu nível. Todo dia aparecem 3 missões novas: complete as três e ganhe um baú de bônus.' },
+  { sel: '.tab[data-v=trilha]', v: 'trilha', t: 'Trilha do Leitor 🧭', x: 'Seu nível de leitor e um plano de livros no seu ritmo: começa com textos curtos e simples e fica mais desafiador aos poucos. Leia os livros do degrau para subir de nível.' },
   { sel: '.tab[data-v=foryou]', v: 'foryou', t: 'Para você', x: 'Um feed com sugestões de livros, frases, curiosidades e quizzes, misturado com os posts dos seus amigos.' },
   { sel: '.tab[data-v=social]', v: 'social', t: 'Comunidade', x: 'Siga outros leitores, publique resenhas e frases, entre em comunidades de leitura e dispute os rankings da sua cidade, do estado, do país e do mundo.' },
   { sel: '.tab[data-v=library]', v: 'library', t: 'Pesquisar', x: 'Milhares de livros gratuitos para ler aqui dentro. Busque por título, autor ou tema.' },
@@ -3585,7 +3761,9 @@ function tutorialFim(concluiu) {
   TUT.i = -1; const el = $('#tut'); if (el) el.remove();
   const g = G(); g.tutVisto = 1;
   if (concluiu && !g.cont.tutorial) gameConta('tutorial'); else Store.save(state);
-  view = 'today'; render(); window.scrollTo(0, 0);
+  view = state.trilha && state.trilha.on && !state.trilha.vistaTut ? 'trilha' : 'today';
+  if (state.trilha) state.trilha.vistaTut = 1;
+  render(); window.scrollTo(0, 0);
 }
 function tutorialMostra() {
   const p = TUT_PASSOS[TUT.i]; if (!p) return tutorialFim(true);
@@ -3953,7 +4131,7 @@ const _showTool7 = showTool;
 showTool = function (sel) {
   _showTool7(sel);
   const el = $('#rtool');
-  if (el && SOC.token) { el.insertAdjacentHTML('beforeend', '<button data-g="sharesel">💬 Compartilhar</button>'); el.style.width = 'auto'; }
+  if (el && SOC.token) { el.insertAdjacentHTML('beforeend', '<button data-g="sharesel">💬 Compartilhar</button>'); }
 };
 const _readerShell7 = readerShell;
 readerShell = function (inner, theme) {
@@ -4161,6 +4339,358 @@ setInterval(() => { if (typeof R !== 'undefined' && R) agendaJogo(); }, 60000);
   };
   tick();
 })();
+</script>
+<script>
+/* ============ Trilha do Leitor: nível de leitor e um plano de livros que fica mais difícil aos poucos ============ */
+const TR_DEGRAUS = [
+  null,
+  { e: '🌱', n: 'Primeiros passos', leitor: 'Leitor iniciante', d: 'Textos curtos e de linguagem simples: contos, fábulas e histórias que dá para terminar numa sentada.', meta: 3, min: 5 },
+  { e: '🌿', n: 'Histórias curtas', leitor: 'Leitor em formação', d: 'Novelas leves e contos um pouco maiores. O vocabulário começa a variar, mas a história puxa você.', meta: 2, min: 10 },
+  { e: '🌳', n: 'Romances acessíveis', leitor: 'Leitor constante', d: 'Seus primeiros romances inteiros, com enredo envolvente e linguagem ainda tranquila.', meta: 2, min: 15 },
+  { e: '📚', n: 'Clássicos', leitor: 'Leitor de clássicos', d: 'Os grandes clássicos. Frases mais longas e palavras de outra época: use o ✨ Significado sem medo.', meta: 2, min: 20 },
+  { e: '🦉', n: 'Clássicos densos', leitor: 'Leitor experiente', d: 'Narradores irônicos, ideias mais profundas e um vocabulário rico. Leitura para saborear devagar.', meta: 2, min: 25 },
+  { e: '🏛️', n: 'Grandes desafios', leitor: 'Leitor mestre', d: 'Obras monumentais, de linguagem difícil e muitas páginas. Quem chega aqui lê qualquer coisa.', meta: 99, min: 30 }
+];
+const TR_PT = [
+  // degrau 1: curtos e simples
+  { id: 'javanes', t: 'O Homem que Sabia Javanês', a: 'Lima Barreto', mt: ['javanes', 'javanez'], d: 1, g: ['humor', 'classics'], tam: 'Conto', why: 'Um malandro finge falar javanês para conseguir emprego. Curto, rápido e muito engraçado.' },
+  { id: 'novacal', t: 'A Nova Califórnia', a: 'Lima Barreto', mt: ['nova california'], d: 1, g: ['humor', 'fantasy', 'mystery'], tam: 'Conto', why: 'Um químico misterioso descobre como transformar ossos em ouro, e a cidade inteira enlouquece.' },
+  { id: 'cartomante', t: 'A Cartomante', a: 'Machado de Assis', mt: ['cartomante'], d: 1, g: ['mystery', 'romance', 'classics'], tam: 'Conto', why: 'Um triângulo amoroso, uma cartomante e um final que pega todo mundo de surpresa.' },
+  { id: 'missagalo', t: 'Missa do Galo', a: 'Machado de Assis', mt: ['missa do galo'], d: 1, g: ['romance', 'classics'], tam: 'Conto', why: 'Uma conversa de madrugada entre um rapaz e uma mulher mais velha. Pouca ação, muito clima.' },
+  { id: 'enfermeiro', t: 'O Enfermeiro', a: 'Machado de Assis', mt: ['enfermeiro'], d: 1, g: ['mystery', 'drama', 'classics'], tam: 'Conto', why: 'Um enfermeiro cuida de um velho insuportável… até que algo acontece. Curto e cheio de culpa.' },
+  { id: 'saci', t: 'O Saci', a: 'Monteiro Lobato', mt: ['saci'], d: 1, g: ['children', 'fantasy', 'adventure'], tam: 'Infantojuvenil', why: 'Pedrinho captura um saci e descobre os seres da mata brasileira. Leve e divertido em qualquer idade.' },
+  { id: 'fabulas', t: 'Fábulas', a: 'Monteiro Lobato', mt: ['fabulas'], d: 1, g: ['children', 'humor', 'philosophy'], tam: 'Fábulas', why: 'Fábulas curtinhas, cada uma com uma moral para pensar. Perfeitas para ler 5 minutos por dia.' },
+  { id: 'poesinf', t: 'Poesias Infantis', a: 'Olavo Bilac', mt: ['poesias infantis'], d: 1, g: ['poetry', 'children'], tam: 'Poemas', why: 'Poemas curtos e musicais. Bom para pegar o ritmo da leitura sem compromisso.' },
+  // degrau 2: novelas e contos maiores
+  { id: 'alienista', t: 'O Alienista', a: 'Machado de Assis', mt: ['alienista'], d: 2, g: ['humor', 'classics', 'philosophy'], tam: 'Novela', why: 'Um médico decide internar quem ele acha louco… e a lista não para de crescer. Crítica divertida.' },
+  { id: 'cincomin', t: 'Cinco Minutos', a: 'José de Alencar', mt: ['cinco minutos'], d: 2, g: ['romance'], tam: 'Novela', why: 'Um atraso de cinco minutos faz um rapaz conhecer uma mulher misteriosa. Romance curto e fácil.' },
+  { id: 'viuvinha', t: 'A Viuvinha', a: 'José de Alencar', mt: ['viuvinha'], d: 2, g: ['romance', 'drama'], tam: 'Novela', why: 'Um casamento interrompido na noite de núpcias e um segredo que muda tudo.' },
+  { id: 'narizinho', t: 'Reinações de Narizinho', a: 'Monteiro Lobato', mt: ['narizinho'], d: 2, g: ['children', 'fantasy', 'adventure'], tam: 'Infantojuvenil', why: 'As aventuras do Sítio do Picapau Amarelo, com Emília, Pedrinho e companhia.' },
+  { id: 'paicontra', t: 'Pai contra Mãe', a: 'Machado de Assis', mt: ['pai contra mae'], d: 2, g: ['drama', 'history', 'classics'], tam: 'Conto', why: 'Um conto forte sobre a escravidão no Rio de Janeiro. Curto, mas fica na cabeça por dias.' },
+  { id: 'noitetaverna', t: 'Noite na Taverna', a: 'Álvares de Azevedo', mt: ['noite na taverna'], d: 2, g: ['horror', 'mystery', 'drama'], tam: 'Contos', why: 'Amigos bêbados numa taverna contam histórias macabras, cada uma mais sombria que a outra.' },
+  { id: 'contosamaz', t: 'Contos Amazônicos', a: 'Inglês de Sousa', mt: ['contos amazonicos'], d: 2, g: ['horror', 'mystery', 'adventure'], tam: 'Contos', why: 'Lendas, assombrações e mistérios da Amazônia. Ótimo para quem gosta de suspense.' },
+  // degrau 3: romances acessíveis
+  { id: 'moreninha', t: 'A Moreninha', a: 'Joaquim Manuel de Macedo', mt: ['moreninha'], d: 3, g: ['romance', 'humor'], tam: 'Romance', why: 'Uma aposta entre estudantes vira um romance numa ilha. Leve, divertido e um dos primeiros best-sellers do Brasil.' },
+  { id: 'sargento', t: 'Memórias de um Sargento de Milícias', a: 'Manuel Antônio de Almeida', mt: ['sargento de milicias'], d: 3, g: ['humor', 'adventure', 'history'], tam: 'Romance', why: 'As trapalhadas de Leonardo, um malandro no Rio dos tempos do rei. Engraçado do começo ao fim.' },
+  { id: 'isaura', t: 'A Escrava Isaura', a: 'Bernardo Guimarães', mt: ['escrava isaura'], d: 3, g: ['romance', 'drama', 'history'], tam: 'Romance', why: 'A luta de Isaura pela liberdade. A história que virou uma das novelas mais famosas do Brasil.' },
+  { id: 'inocencia', t: 'Inocência', a: 'Visconde de Taunay', mt: ['innocencia', 'inocencia'], d: 3, g: ['romance', 'drama'], tam: 'Romance', why: 'Um amor proibido no sertão de Mato Grosso. Narrativa simples e envolvente.' },
+  { id: 'helena', t: 'Helena', a: 'Machado de Assis', mt: ['helena'], d: 3, g: ['romance', 'drama', 'classics'], tam: 'Romance', why: 'Uma moça chega a uma família rica guardando um segredo. Machado ainda no modo romântico, fácil de ler.' },
+  { id: 'policarpo', t: 'Triste Fim de Policarpo Quaresma', a: 'Lima Barreto', mt: ['policarpo'], d: 3, g: ['humor', 'history', 'drama'], tam: 'Romance', why: 'Um patriota exagerado quer que o Brasil fale tupi. Engraçado e triste ao mesmo tempo.' },
+  { id: 'luciola', t: 'Lucíola', a: 'José de Alencar', mt: ['luciola'], d: 3, g: ['romance', 'drama'], tam: 'Romance', why: 'Um rapaz se apaixona por uma cortesã da corte. Romance intenso e de leitura fluida.' },
+  // degrau 4: clássicos
+  { id: 'domcasmurro', t: 'Dom Casmurro', a: 'Machado de Assis', mt: ['dom casmurro'], d: 4, g: ['romance', 'mystery', 'classics'], tam: 'Romance', why: 'Capitu traiu ou não traiu? O livro mais discutido da literatura brasileira.' },
+  { id: 'cortico', t: 'O Cortiço', a: 'Aluísio Azevedo', mt: ['cortico'], d: 4, g: ['drama', 'history', 'classics'], tam: 'Romance', why: 'Um cortiço inteiro como personagem: ambição, desejo e briga de vizinhos no Rio.' },
+  { id: 'iracema', t: 'Iracema', a: 'José de Alencar', mt: ['iracema'], d: 4, g: ['romance', 'history', 'poetry'], tam: 'Romance', why: 'Prosa que parece poesia. Vocabulário cheio de palavras indígenas: ótimo para treinar o ✨ Significado.' },
+  { id: 'guarani', t: 'O Guarani', a: 'José de Alencar', mt: ['guarany', 'guarani'], d: 4, g: ['adventure', 'romance', 'history'], tam: 'Romance', why: 'Peri, um indígena guerreiro, protege Ceci em plena selva. Aventura com muita ação.' },
+  { id: 'senhora', t: 'Senhora', a: 'José de Alencar', mt: ['senhora'], d: 4, g: ['romance', 'drama'], tam: 'Romance', why: 'Uma moça rica "compra" o marido que a desprezou quando era pobre. Vingança e orgulho.' },
+  { id: 'primobas', t: 'O Primo Basílio', a: 'Eça de Queirós', mt: ['primo basilio'], d: 4, g: ['romance', 'drama', 'classics'], tam: 'Romance', why: 'Uma traição em Lisboa e uma empregada chantagista. Suspense de verdade.' },
+  { id: 'cidadeserras', t: 'A Cidade e as Serras', a: 'Eça de Queirós', mt: ['cidade e as serras'], d: 4, g: ['humor', 'philosophy', 'classics'], tam: 'Romance', why: 'Um ricaço cansado da vida moderna em Paris descobre a vida simples no campo.' },
+  // degrau 5: clássicos densos
+  { id: 'brascubas', t: 'Memórias Póstumas de Brás Cubas', a: 'Machado de Assis', mt: ['bras cubas', 'braz cubas'], d: 5, g: ['humor', 'philosophy', 'classics'], tam: 'Romance', why: 'Um defunto conta a própria vida sem nenhuma vergonha. Irônico, moderno e genial.' },
+  { id: 'quincas', t: 'Quincas Borba', a: 'Machado de Assis', mt: ['quincas borba'], d: 5, g: ['philosophy', 'drama', 'classics'], tam: 'Romance', why: 'Uma herança, um cachorro e uma filosofia maluca: "ao vencedor, as batatas".' },
+  { id: 'maias', t: 'Os Maias', a: 'Eça de Queirós', mt: ['os maias'], d: 5, g: ['drama', 'romance', 'classics'], tam: 'Romance', why: 'A saga de uma família da elite de Lisboa e um amor impossível. Longo e recompensador.' },
+  { id: 'ateneu', t: 'O Ateneu', a: 'Raul Pompeia', mt: ['atheneu', 'ateneu'], d: 5, g: ['drama', 'classics'], tam: 'Romance', why: 'Memórias de um colégio interno. Vocabulário rico e difícil: um ótimo desafio.' },
+  { id: 'esau', t: 'Esaú e Jacó', a: 'Machado de Assis', mt: ['esau e jaco'], d: 5, g: ['drama', 'history', 'philosophy'], tam: 'Romance', why: 'Gêmeos que discordam em tudo, até sobre Império e República.' },
+  { id: 'mensagem', t: 'Mensagem', a: 'Fernando Pessoa', mt: ['mensagem'], d: 5, g: ['poetry', 'history'], tam: 'Poemas', why: 'O único livro em português que Pessoa publicou em vida. Poemas curtos, mas para ler devagar.' },
+  // degrau 6: grandes desafios
+  { id: 'sertoes', t: 'Os Sertões', a: 'Euclides da Cunha', mt: ['sertoes'], d: 6, g: ['history', 'science', 'philosophy'], tam: 'Ensaio', why: 'A Guerra de Canudos contada entre ciência, história e literatura. Um dos livros mais difíceis do Brasil.' },
+  { id: 'lusiadas', t: 'Os Lusíadas', a: 'Luís de Camões', mt: ['lusiadas'], d: 6, g: ['poetry', 'history', 'adventure'], tam: 'Epopeia', why: 'A viagem de Vasco da Gama em versos. O grande poema da língua portuguesa.' },
+  { id: 'sermoes', t: 'Sermões', a: 'Padre Antônio Vieira', mt: ['sermoes', 'sermao'], d: 6, g: ['philosophy', 'history'], tam: 'Sermões', why: 'A oratória mais poderosa da língua. Argumentação de altíssimo nível.' },
+  { id: 'quixote', t: 'Dom Quixote', a: 'Miguel de Cervantes', mt: ['quixote', 'quichote'], d: 6, g: ['adventure', 'humor', 'classics'], tam: 'Romance', why: 'O cavaleiro que enlouqueceu de tanto ler. Longo, engraçado e o pai do romance moderno.' }
+];
+const TR_EN = [
+  { id: 'en_aesop', t: "Aesop's Fables", a: 'Aesop', mt: ['aesop'], d: 1, g: ['children', 'philosophy'], tam: 'Fábulas', why: 'Fábulas curtíssimas em inglês simples. Ótimo para treinar o idioma.' },
+  { id: 'en_rabbit', t: 'The Tale of Peter Rabbit', a: 'Beatrix Potter', mt: ['peter rabbit'], d: 1, g: ['children'], tam: 'Infantil', why: 'Uma historinha curtinha e clássica, perfeita para começar a ler em inglês.' },
+  { id: 'en_prince', t: 'The Happy Prince and Other Tales', a: 'Oscar Wilde', mt: ['happy prince'], d: 1, g: ['children', 'drama', 'fantasy'], tam: 'Contos', why: 'Contos de fadas de Oscar Wilde: simples, bonitos e um pouco tristes.' },
+  { id: 'en_alice', t: "Alice's Adventures in Wonderland", a: 'Lewis Carroll', mt: ['alice'], d: 2, g: ['fantasy', 'children', 'humor'], tam: 'Novela', why: 'Alice cai na toca do coelho. Curto, maluco e cheio de jogos de palavras.' },
+  { id: 'en_oz', t: 'The Wonderful Wizard of Oz', a: 'L. Frank Baum', mt: ['wizard of oz'], d: 2, g: ['fantasy', 'adventure', 'children'], tam: 'Novela', why: 'Dorothy, o Espantalho e o Homem de Lata. Inglês simples e história conhecida.' },
+  { id: 'en_carol', t: 'A Christmas Carol', a: 'Charles Dickens', mt: ['christmas carol'], d: 2, g: ['drama', 'fantasy', 'classics'], tam: 'Novela', why: 'Scrooge e os três fantasmas do Natal. Curto e marcante.' },
+  { id: 'en_timemach', t: 'The Time Machine', a: 'H. G. Wells', mt: ['time machine'], d: 2, g: ['scifi', 'adventure'], tam: 'Novela', why: 'A primeira grande história de viagem no tempo. Curta e cheia de ideias.' },
+  { id: 'en_holmes', t: 'The Adventures of Sherlock Holmes', a: 'Arthur Conan Doyle', mt: ['adventures of sherlock holmes'], d: 3, g: ['mystery', 'adventure'], tam: 'Contos', why: 'Doze casos do detetive mais famoso do mundo. Cada conto é um mistério completo.' },
+  { id: 'en_treasure', t: 'Treasure Island', a: 'Robert Louis Stevenson', mt: ['treasure island'], d: 3, g: ['adventure'], tam: 'Romance', why: 'Piratas, um mapa e um tesouro escondido. A aventura clássica.' },
+  { id: 'en_jekyll', t: 'Strange Case of Dr Jekyll and Mr Hyde', a: 'Robert Louis Stevenson', mt: ['jekyll'], d: 3, g: ['horror', 'mystery', 'scifi'], tam: 'Novela', why: 'O médico e o monstro. Curto, sombrio e cheio de suspense.' },
+  { id: 'en_anne', t: 'Anne of Green Gables', a: 'L. M. Montgomery', mt: ['anne of green gables'], d: 3, g: ['romance', 'children', 'humor'], tam: 'Romance', why: 'Uma órfã tagarela e cheia de imaginação conquista uma cidadezinha.' },
+  { id: 'en_pride', t: 'Pride and Prejudice', a: 'Jane Austen', mt: ['pride and prejudice'], d: 4, g: ['romance', 'humor', 'classics'], tam: 'Romance', why: 'Elizabeth e Mr. Darcy. O romance mais amado da literatura inglesa.' },
+  { id: 'en_frank', t: 'Frankenstein', a: 'Mary Shelley', mt: ['frankenstein'], d: 4, g: ['horror', 'scifi', 'classics'], tam: 'Romance', why: 'Um cientista cria vida e foge da própria criatura. O nascimento da ficção científica.' },
+  { id: 'en_dracula', t: 'Dracula', a: 'Bram Stoker', mt: ['dracula'], d: 4, g: ['horror'], tam: 'Romance', why: 'O vampiro original, contado em cartas e diários.' },
+  { id: 'en_dorian', t: 'The Picture of Dorian Gray', a: 'Oscar Wilde', mt: ['dorian gray'], d: 4, g: ['drama', 'philosophy', 'horror'], tam: 'Romance', why: 'Um rapaz não envelhece, mas o retrato dele sim. Frases afiadas em cada página.' },
+  { id: 'en_wuther', t: 'Wuthering Heights', a: 'Emily Brontë', mt: ['wuthering heights'], d: 5, g: ['romance', 'drama', 'horror'], tam: 'Romance', why: 'Um amor obsessivo e destrutivo nos campos da Inglaterra.' },
+  { id: 'en_expect', t: 'Great Expectations', a: 'Charles Dickens', mt: ['great expectations'], d: 5, g: ['drama', 'classics'], tam: 'Romance', why: 'Um órfão pobre recebe uma fortuna misteriosa. Longo e cheio de personagens.' },
+  { id: 'en_crime', t: 'Crime and Punishment', a: 'Fyodor Dostoyevsky', mt: ['crime and punishment'], d: 5, g: ['philosophy', 'drama', 'mystery'], tam: 'Romance', why: 'Um estudante comete um crime e passa o livro inteiro lutando com a própria consciência.' },
+  { id: 'en_moby', t: 'Moby Dick', a: 'Herman Melville', mt: ['moby dick'], d: 6, g: ['adventure', 'philosophy', 'classics'], tam: 'Romance', why: 'A caçada à baleia branca. Enorme, estranho e genial.' },
+  { id: 'en_karam', t: 'The Brothers Karamazov', a: 'Fyodor Dostoyevsky', mt: ['karamazov'], d: 6, g: ['philosophy', 'drama'], tam: 'Romance', why: 'Fé, culpa e um assassinato em família. Um dos maiores romances já escritos.' },
+  { id: 'en_middle', t: 'Middlemarch', a: 'George Eliot', mt: ['middlemarch'], d: 6, g: ['drama', 'romance', 'classics'], tam: 'Romance', why: 'A vida de uma cidade inglesa inteira. Para leitores de fôlego.' }
+];
+const TR_TODOS = TR_PT.map(b => Object.assign({ l: 'pt' }, b)).concat(TR_EN.map(b => Object.assign({ l: 'en' }, b)));
+const TR_POR_ID = {}; TR_TODOS.forEach(b => { TR_POR_ID[b.id] = b; });
+const TRS = { res: {}, buscando: false, todos: false };
+
+function TRL() {
+  if (!state.trilha) state.trilha = { on: false, nivel: 0, feitos: {}, gids: {}, resp: null, inicio: '' };
+  const t = state.trilha; t.feitos = t.feitos || {}; t.gids = t.gids || {};
+  return t;
+}
+function nivelInicial(freq, conf) {
+  if (freq === 0) return 1;
+  const base = conf <= 0 ? 1 : conf === 1 ? 2 : 4;
+  if (freq === 1) return Math.min(base, 2);
+  if (freq === 3) return Math.min(5, base + 1);
+  return base;
+}
+function trilhaDoOnb(o) {
+  if (!o || o.freq < 0 || o.conf < 0) return;
+  const t = TRL();
+  t.resp = { freq: o.freq, conf: o.conf, em: todayStr() };
+  if (!t.nivel) t.nivel = nivelInicial(o.freq, o.conf);
+  t.on = !!o.plano;
+  if (t.on && !t.inicio) t.inicio = todayStr();
+  if (t.on) view = 'trilha';
+  Store.save(state);
+}
+// frequência de verdade, pelos dias com leitura nos últimos 30 dias
+function freqReal() {
+  const hoje = todayStr(), dm = dayMap();
+  let dias = 0;
+  for (let i = 0; i < 30; i++) { const d = dm[addDays(hoje, -i)]; if (d && (d.minutes > 0 || d.pages > 0)) dias++; }
+  const rot = dias === 0 ? 'Ainda não começou' : dias <= 4 ? 'De vez em quando' : dias <= 12 ? 'Algumas vezes por semana' : dias <= 24 ? 'Quase todo dia' : 'Todo dia';
+  return { dias, rot };
+}
+const FREQ_DECL = ['Não lia ou quase nunca', 'Algumas vezes por mês', 'Algumas vezes por semana', 'Todo dia'];
+function trLinguas() {
+  const L = userLangs();
+  const out = [];
+  if (L.includes('pt') || !L.includes('en')) out.push('pt');
+  if (L.includes('en')) out.push('en');
+  return out;
+}
+function trLivrosDoDegrau(n) {
+  const L = trLinguas(), gostos = new Set((state.profile && state.profile.genres) || []);
+  return TR_TODOS.filter(b => b.d === n && L.includes(b.l)).map(b => {
+    let p = 0; b.g.forEach(g => { if (gostos.has(g)) p += 2; });
+    if (b.l === L[0]) p += 1;
+    return { b, p };
+  }).sort((x, y) => y.p - x.p || TR_TODOS.indexOf(x.b) - TR_TODOS.indexOf(y.b)).map(x => x.b);
+}
+// um livro da trilha conta como lido se o usuário marcou, ou se terminou ele na estante
+function trFeito(b) {
+  const t = TRL();
+  if (t.feitos[b.id]) return true;
+  const gid = t.gids[b.id];
+  if (gid && state.books.some(x => String(x.gid) === String(gid) && x.status === 'finished')) { t.feitos[b.id] = Date.now(); return true; }
+  const mt = b.mt.map(norm);
+  const achou = state.books.find(x => x.status === 'finished' && mt.some(m => norm(x.title).includes(m)) && norm(x.author || '').includes(norm(b.a.split(' ').pop())));
+  if (achou) { t.feitos[b.id] = Date.now(); return true; }
+  return false;
+}
+function trFeitosNoDegrau(n) { return trLivrosDoDegrau(n).filter(trFeito).length; }
+// sobe de degrau quando terminar livros suficientes do degrau atual
+function trConfereSubida() {
+  const t = TRL(); if (!t.on || !t.nivel) return;
+  let subiu = false;
+  while (t.nivel < 6 && trFeitosNoDegrau(t.nivel) >= TR_DEGRAUS[t.nivel].meta) {
+    t.nivel++; subiu = true;
+    const D = TR_DEGRAUS[t.nivel];
+    CEL.fila.push({ tipo: 'trilha', e: D.e, nome: 'Novo degrau: ' + D.n, desc: `Você agora é ${D.leitor}. Os próximos livros são um pouquinho mais ricos. Sua meta sugerida passa a ser ${D.min} minutos por dia.` });
+  }
+  if (subiu) {
+    Store.save(state);
+    if (state.settings.goalType === 'minutes' && state.settings.dailyGoal < TR_DEGRAUS[t.nivel].min) t.sugerirMeta = TR_DEGRAUS[t.nivel].min;
+    celebra();
+  }
+}
+
+/* acha o livro numa biblioteca gratuita (Gutenberg e, se não tiver lá, a Wikisource) */
+async function trResolve(b) {
+  const t = TRL();
+  if (t.gids[b.id] !== undefined && t.gids[b.id] !== 0) { TRS.res[b.id] = t.gids[b.id]; return; }
+  if (TRS.res[b.id] !== undefined) return;
+  const mt = b.mt.map(norm), last = norm(b.a.split(' ').pop());
+  const casa = g => mt.some(m => norm(g.title).includes(m)) && (!last || norm(g.author || '').includes(last) || norm(g.author || '') === '');
+  let hit = null, falhou = false;
+  try {
+    hit = (await fetchList({ search: b.a.split(' ').pop() + ' ' + b.mt[0], languages: b.l })).find(casa);
+    if (!hit) hit = (await fetchList({ search: b.mt[0], languages: b.l })).find(casa);
+  } catch (e) { falhou = true; }
+  if (!hit) {
+    try {
+      const ws = await buscaWikisource(b.t, [b.l]);
+      hit = ws.find(g => mt.some(m => norm(g.title) === m || norm(g.title).startsWith(m))) || ws.find(g => mt.some(m => norm(g.title).includes(m)));
+      if (hit && !hit.author) hit.author = b.a;
+      falhou = false;
+    } catch (e) {}
+  }
+  if (hit) { TRS.res[b.id] = hit.gid; t.gids[b.id] = hit.gid; Store.save(state); }
+  else TRS.res[b.id] = falhou ? -1 : 0;
+  const el = document.querySelector('[data-tr="' + b.id + '"] .tract');
+  if (el) el.innerHTML = trAct(b);
+}
+async function trResolveVisiveis(lista) {
+  const q = lista.filter(b => TRS.res[b.id] === undefined);
+  const worker = async () => { while (q.length) await trResolve(q.shift()); };
+  await Promise.all([worker(), worker(), worker()]);
+}
+function trAct(b) {
+  const feito = trFeito(b);
+  const marca = feito ? '<span class="trok">✓ Lido</span>' : `<button class="btn sm" data-g="trfeito" data-id="${b.id}">Já li</button>`;
+  const r = TRS.res[b.id] !== undefined ? TRS.res[b.id] : (TRL().gids[b.id] || undefined);
+  if (r === undefined) return `<span class="muted small">Procurando nas bibliotecas…</span>${marca}`;
+  if (r && r !== -1 && GCACHE[r]) return tileAct(GCACHE[r]) + marca;
+  if (r && r !== -1) {
+    const sb = shelfBook(r);
+    if (sb) return `<button class="btn sm primary" data-x="read" data-id="${sb.id}">${sb.currentPage > 0 ? 'Continuar' : 'Ler'}</button>${marca}`;
+  }
+  return `<button class="btn sm" data-x="psearch" data-q="${esc(b.t)}">Procurar</button>${marca}`;
+}
+function trCard(b, i, atual) {
+  const feito = trFeito(b);
+  return `<article class="card brc trc ${feito ? 'feito' : ''}" data-tr="${b.id}" style="animation-delay:${Math.min(i, 8) * 45}ms">${cv({ gid: 'tr_' + b.id, title: b.t, author: b.a })}
+    <div class="brm"><div class="brth">${esc(b.tam)}${b.l === 'en' ? ' · em inglês' : ''}</div><h3>${esc(b.t)}</h3><div class="by">${esc(b.a)}</div>
+    <p>${esc(b.why)}</p><div class="bract tract">${atual ? trAct(b) : ''}</div></div></article>`;
+}
+function trEscada(nv) {
+  return `<div class="trescada">${[1, 2, 3, 4, 5, 6].map(n => {
+    const D = TR_DEGRAUS[n];
+    return `<div class="trd ${n < nv ? 'ok' : n === nv ? 'on' : ''}" title="${esc(D.n)}"><span>${n < nv ? '✓' : D.e}</span><small>${esc(D.n)}</small></div>`;
+  }).join('')}</div>`;
+}
+function trPerguntas() {
+  const t = TRL(), r = t.resp || {};
+  const ch = (campo, l) => l.map(([v, tx]) => `<button class="gchip ${r[campo] === v ? 'on' : ''}" data-g="trresp" data-v="${campo}" data-id="${v}">${tx}</button>`).join('');
+  return `<section class="card"><h2>🧭 Descubra seu nível de leitor</h2>
+    <p class="muted" style="margin-top:0">Duas perguntas rápidas para montar uma trilha de livros no seu ritmo: começa com textos curtos e simples e vai ficando mais rica aos poucos.</p>
+    <p style="margin:1rem 0 .4rem"><b>Com que frequência você lê?</b></p>
+    <div class="gchips">${ch('freq', [[0, 'Não leio ou quase nunca'], [1, 'Algumas vezes por mês'], [2, 'Algumas vezes por semana'], [3, 'Todo dia']])}</div>
+    <p style="margin:1.2rem 0 .4rem"><b>Como você se sente lendo um livro?</b></p>
+    <div class="gchips">${ch('conf', [[0, 'Me canso rápido ou acho difícil'], [1, 'Leio tranquilo livros simples'], [2, 'Encaro clássicos e textos longos']])}</div>
+    <div class="bookact" style="margin-top:1.2rem"><button class="btn primary" data-g="trcomecar">Montar minha trilha</button></div></section>`;
+}
+function renderTrilha() {
+  const t = TRL();
+  if (!t.resp || !t.nivel) return trPerguntas();
+  trConfereSubida();
+  const nv = t.nivel, D = TR_DEGRAUS[nv], fr = freqReal();
+  const lista = trLivrosDoDegrau(nv);
+  const feitos = lista.filter(trFeito).length, meta = Math.min(D.meta, lista.length);
+  setTimeout(() => trResolveVisiveis(lista), 0);
+  const prox = nv < 6 ? trLivrosDoDegrau(nv + 1).slice(0, 3) : [];
+  const dicas = {
+    1: 'Leia um conto por vez, sem pressa. Terminou? Marque como lido e escolha o próximo.',
+    2: 'Achou uma palavra estranha? Selecione e toque em ✨ Significado. Isso vai acontecer mais daqui pra frente, e tudo bem.',
+    3: 'Romances inteiros! Leia um capítulo por dia e deixe a história te puxar.',
+    4: 'Clássicos têm frases longas. Se travar, leia o parágrafo em voz baixa: ajuda muito.',
+    5: 'Grife as frases que te marcarem 🖍. Voltar nelas depois é metade do prazer desses livros.',
+    6: 'Livros grandes se leem em partes. Uma meta de páginas por dia funciona melhor que tentar devorar.'
+  };
+  const sug = t.sugerirMeta && state.settings.dailyGoal < t.sugerirMeta;
+  return `<section class="card trhead">
+    <div class="trtop"><div class="tremoji">${D.e}</div><div><small class="muted">Seu nível de leitor</small><h2 style="margin:.1rem 0">${esc(D.leitor)}</h2>
+      <div class="muted small">Degrau ${nv} de 6 · ${esc(D.n)}</div></div></div>
+    ${trEscada(nv)}
+    <div class="trnums">
+      <div><b>${esc(fr.rot)}</b><small>Frequência real · ${fr.dias} ${fr.dias === 1 ? 'dia' : 'dias'} com leitura nos últimos 30</small></div>
+      <div><b>${esc(FREQ_DECL[t.resp.freq] || '')}</b><small>Como você lia quando começou</small></div>
+      <div><b>${feitos} de ${meta}</b><small>${nv < 6 ? 'livros deste degrau para subir' : 'livros lidos no último degrau'}</small></div>
+    </div>
+    <div class="mbar"><i style="width:${Math.min(100, Math.round(feitos / Math.max(1, meta) * 100))}%"></i></div>
+    <p class="small" style="margin:.8rem 0 0">💡 ${dicas[nv]}</p>
+    ${sug ? `<div class="trsug">Você subiu de degrau! Que tal aumentar a meta diária para <b>${t.sugerirMeta} minutos</b>? <button class="btn sm primary" data-g="trmeta">Aumentar</button><button class="btn sm" data-g="trmetanao">Agora não</button></div>` : ''}
+    ${!t.on ? '<div class="trsug">A trilha está pausada. <button class="btn sm primary" data-g="trligar">Retomar trilha</button></div>' : ''}
+  </section>
+  <h3 class="sechead">${D.e} ${esc(D.n)} <span class="muted small">${esc(D.d)}</span></h3>
+  <div class="brgrid">${lista.map((b, i) => trCard(b, i, true)).join('')}</div>
+  ${prox.length ? `<h3 class="sechead">🔒 Próximo degrau: ${esc(TR_DEGRAUS[nv + 1].n)}</h3><p class="muted small" style="margin:-.3rem 0 .7rem">${esc(TR_DEGRAUS[nv + 1].d)} Libera quando você ler ${D.meta} livros deste degrau.</p>
+    <div class="trprox">${prox.map(b => `<div><b>${esc(b.t)}</b><small>${esc(b.a)}</small></div>`).join('')}</div>` : ''}
+  <section class="card" style="margin-top:1.2rem"><h2>Ajustar a trilha</h2>
+    <p class="muted small" style="margin-top:0">Os livros são escolhidos pelos seus gostos (${esc(((state.profile && state.profile.genres) || []).map(genreLabel).filter(Boolean).join(', ') || 'nenhum escolhido')}) e pelos idiomas que você lê.</p>
+    <div class="bookact">
+      ${nv > 1 ? '<button class="btn" data-g="trdesce">Está difícil: voltar um degrau</button>' : ''}
+      ${nv < 6 ? '<button class="btn" data-g="trsobe">Está fácil: pular um degrau</button>' : ''}
+      <button class="btn" data-g="trrefaz">Refazer as perguntas</button>
+      ${t.on ? '<button class="btn" data-g="trpausa">Pausar trilha</button>' : ''}
+    </div></section>`;
+}
+VIEWS.trilha = renderTrilha;
+// card no Hoje
+const _vTodayTr = VIEWS.today;
+VIEWS.today = function () {
+  const t = TRL();
+  let c = '';
+  if (!t.resp) c = `<section class="card trmini"><div class="tremoji">🧭</div><div><b>Descubra seu nível de leitor</b><p class="muted small" style="margin:.2rem 0 .5rem">Responda 2 perguntas e receba uma trilha de livros que fica mais desafiadora aos poucos.</p><button class="btn sm primary" data-x="go" data-v="trilha">Começar</button></div></section>`;
+  else if (t.on && t.nivel) {
+    const D = TR_DEGRAUS[t.nivel], lista = trLivrosDoDegrau(t.nivel), f = lista.filter(trFeito).length;
+    const lendo = lista.find(b => { const g = t.gids[b.id]; const sb = g && shelfBook(g); return sb && sb.status === 'reading'; });
+    c = `<section class="card trmini"><div class="tremoji">${D.e}</div><div style="flex:1"><small class="muted">Trilha do Leitor · ${esc(D.leitor)}</small><b style="display:block">${lendo ? 'Continue: ' + esc(lendo.t) : esc(D.n) + ` · ${f} de ${Math.min(D.meta, lista.length)} livros`}</b>
+      <div class="mbar" style="margin:.4rem 0 .5rem"><i style="width:${Math.min(100, Math.round(f / Math.max(1, Math.min(D.meta, lista.length)) * 100))}%"></i></div>
+      <button class="btn sm primary" data-x="go" data-v="trilha">Abrir trilha</button></div></section>`;
+  }
+  const h = _vTodayTr();
+  return c ? h.replace('</section>', '</section>' + c) : h;
+};
+
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-g]'); if (!el) return;
+  const g = el.dataset.g, id = el.dataset.id, t = TRL();
+  switch (g) {
+    case 'trresp': { t.resp = Object.assign({}, t.resp || {}, { [el.dataset.v]: Number(id) }); Store.save(state); render(); break; }
+    case 'trcomecar': {
+      const r = t.resp || {};
+      if (!(r.freq >= 0) || !(r.conf >= 0)) { toast('Responda as duas perguntas.'); break; }
+      r.em = todayStr(); t.nivel = nivelInicial(r.freq, r.conf); t.on = true; t.inicio = t.inicio || todayStr();
+      TRS.res = {}; Store.save(state); render(); window.scrollTo(0, 0);
+      toast(`Trilha pronta! Você começa como ${TR_DEGRAUS[t.nivel].leitor}.`);
+      break;
+    }
+    case 'trfeito': { t.feitos[id] = Date.now(); Store.save(state); render(); break; }
+    case 'trsobe': if (t.nivel < 6) { t.nivel++; TRS.res = {}; Store.save(state); render(); window.scrollTo(0, 0); } break;
+    case 'trdesce': if (t.nivel > 1) { t.nivel--; TRS.res = {}; Store.save(state); render(); window.scrollTo(0, 0); } break;
+    case 'trrefaz': t.resp = null; t.nivel = 0; Store.save(state); render(); window.scrollTo(0, 0); break;
+    case 'trpausa': t.on = false; Store.save(state); render(); break;
+    case 'trligar': t.on = true; Store.save(state); render(); break;
+    case 'trmeta': state.settings.dailyGoal = t.sugerirMeta; t.sugerirMeta = 0; commit(); toast('Meta atualizada.'); break;
+    case 'trmetanao': t.sugerirMeta = 0; Store.save(state); render(); break;
+  }
+});
+// ao terminar um livro, confere se sobe de degrau
+const _finishBookTr = finishBook;
+finishBook = function (bid) { const r = _finishBookTr.apply(this, arguments); setTimeout(trConfereSubida, 800); return r; };
+
+/* ============ Lembrete de leitura que chega com o app fechado ============ */
+// guarda um resumo para o lembrete saber (sem abrir o app) se você já leu hoje
+function infoLembrete() {
+  const hoje = todayStr();
+  let feito = state.lembInfo && state.lembInfo.feito || '';
+  if (goalMet(hoje) || ((dayMap()[hoje] || {}).minutes > 0)) feito = hoje;
+  const lendo = state.books.filter(b => b.status === 'reading' && b.gid).sort((a, b) => (b.lastRead || 0) - (a.lastRead || 0))[0];
+  const falta = Math.max(0, (state.settings.dailyGoal || 0) - (goalVal(hoje) || 0));
+  return { feito, seq: computeStreak(), livro: lendo ? lendo.title : '', meta: state.settings.dailyGoal || 15, un: state.settings.goalType === 'pages' ? 'páginas' : 'minutos', falta, hora: state.settings.reminder || '' };
+}
+const _saveLemb = Store.save;
+Store.save = function (s) {
+  try { if (s === state) { _map = null; s.lembInfo = infoLembrete(); } } catch (e) {}
+  return _saveLemb.call(Store, s);
+};
+async function aplicaLembrete(avisar) {
+  const hora = state.settings.reminder || '';
+  try {
+    if (APP.plat === 'android' && window.PaginasAndroid && PaginasAndroid.agendarLembrete) {
+      if (hora && PaginasAndroid.pedirPermissao) PaginasAndroid.pedirPermissao();
+      PaginasAndroid.agendarLembrete(JSON.stringify({ on: !!hora, hora }));
+    } else if (IS_APP && APP.plat === 'windows') {
+      await (await api('/api/lembrete', { method: 'POST', body: JSON.stringify({ on: !!hora, hora }) })).json();
+    } else return;
+    state.settings.lembAplicado = hora || 'off'; try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} if (IS_APP) diskSave(state);
+    if (avisar) toast(hora ? `Pronto: lembrete de leitura às ${hora}, mesmo com o Páginas fechado.` : 'Lembrete de leitura desligado.');
+  } catch (e) { if (avisar) toast('Não consegui agendar o lembrete: ' + e.message); }
+}
+document.addEventListener('change', e => {
+  if (e.target && e.target.dataset && e.target.dataset.set === 'reminder') setTimeout(() => aplicaLembrete(true), 50);
+});
+setTimeout(function inicioTr() {
+  if (!window.__booted) return setTimeout(inicioTr, 300);
+  try { _map = null; state.lembInfo = infoLembrete(); if (IS_APP) diskSave(state); } catch (e) {}
+  // quem já tinha lembrete antes desta versão passa a receber com o app fechado
+  if ((state.settings.reminder || 'off') !== (state.settings.lembAplicado || 'off') || state.settings.reminder) aplicaLembrete(false);
+}, 900);
 </script>
 <script type="application/json" id="reflexoes">[{"t": "Pense numa opinião forte que você tem. Em que fatos ela se apoia, e quais desses fatos você já conferiu de verdade?", "a": ""}, {"t": "Qual foi a última vez que você mudou de ideia sobre algo importante? O que te convenceu?", "a": ""}, {"t": "Lembre de um personagem de quem você não gosta. Que motivos ele teria para agir como age, do ponto de vista dele?", "a": ""}, {"t": "Se alguém defendesse o oposto do que você pensa sobre um assunto, qual seria o melhor argumento dessa pessoa?", "a": ""}, {"t": "Uma notícia que te deixou indignado(a) esta semana: você leu a fonte original ou só o título?", "a": ""}, {"t": "O que você sabe hoje que, há cinco anos, acharia impossível de entender?", "a": ""}, {"t": "Qual pergunta você evita fazer a si mesmo(a)? Por quê?", "a": ""}, {"t": "Que livro mudou a forma como você vê alguma coisa? O que exatamente mudou?", "a": ""}, {"t": "Diferencie: o que você acredita porque pensou, e o que acredita porque sempre ouviu dizer?", "a": ""}, {"t": "Se você pudesse fazer uma única pergunta a um autor que já morreu, quem seria e o que perguntaria?", "a": ""}, {"t": "Que hábito pequeno, repetido por um ano, mudaria mais a sua vida?", "a": ""}, {"t": "Quando foi a última vez que você disse “não sei” sem medo? Saber que não sabe também é saber.", "a": ""}, {"t": "Uma história é contada de um ponto de vista. Como seria a última coisa que você leu contada por outro personagem?", "a": ""}, {"t": "O que torna um argumento convincente para você: a lógica, a emoção ou quem está falando?", "a": ""}, {"t": "Qual é a diferença entre ter informação e ter conhecimento?", "a": ""}, {"t": "Que ideia você já defendeu e hoje acha errada? O que isso ensina sobre as ideias que você defende agora?", "a": ""}, {"t": "Ler é conversar com alguém que não está aqui. Com quem você conversou hoje?", "a": ""}, {"t": "O que você faria diferente se ninguém nunca soubesse o que você fez?", "a": ""}, {"t": "Pense numa decisão recente. Você escolheu, ou só seguiu o que era mais fácil?", "a": ""}, {"t": "Que palavra você usa sempre sem saber exatamente o que ela significa? Que tal descobrir hoje?", "a": ""}, {"t": "Um bom leitor desconfia até do livro de que gosta. Qual trecho do seu livro atual você questionaria?", "a": ""}, {"t": "Se o mundo inteiro lesse um único livro, qual você escolheria? E qual seria o risco disso?", "a": ""}, {"t": "O que é mais difícil: aprender algo novo ou desaprender algo antigo?", "a": ""}, {"t": "Quando você discorda de alguém, você tenta entender ou tenta vencer?", "a": ""}, {"t": "Que assunto você acha chato? Será que é o assunto, ou o jeito como te apresentaram?", "a": ""}, {"t": "Escreva mentalmente uma frase sobre o seu dia que mereceria estar num livro.", "a": ""}, {"t": "Qual é a sua maior certeza? O que precisaria acontecer para você duvidar dela?", "a": ""}, {"t": "Liberdade é poder fazer qualquer coisa, ou poder escolher o que vale a pena fazer?", "a": ""}, {"t": "Uma pessoa pode ser boa e fazer algo errado? Pense num exemplo de um livro.", "a": ""}, {"t": "O que a sua leitura de hoje tem a ver com a sua vida? Toda história fala de alguém, mesmo que não pareça.", "a": ""}, {"t": "Se você explicasse o que está lendo para uma criança de dez anos, o que diria?", "a": ""}, {"t": "O que é justiça para você? E para o personagem do livro que está lendo?", "a": ""}, {"t": "Que voz falta na história que você está lendo? Quem não tem chance de falar?", "a": ""}, {"t": "Você lê para fugir do mundo ou para entendê-lo melhor? Os dois valem.", "a": ""}, {"t": "Que pergunta este dia deixou sem resposta?", "a": ""}, {"t": "Ser curioso é admitir que existe muito que não se sabe. O que você quer descobrir esta semana?", "a": ""}, {"t": "A primeira impressão sobre alguém costuma estar certa? Lembre de um personagem que te enganou.", "a": ""}, {"t": "Se você pudesse viver dentro de um livro por um dia, qual seria e o que faria?", "a": ""}, {"t": "Qual é a diferença entre uma opinião e um fato? Encontre um exemplo no que você leu hoje.", "a": ""}, {"t": "Por que algumas histórias de séculos atrás ainda falam com a gente hoje?", "a": ""}, {"t": "Conhece-te a ti mesmo.", "a": "Inscrição do templo de Apolo em Delfos"}, {"t": "Uma vida sem reflexão não vale a pena ser vivida.", "a": "Sócrates, segundo Platão"}, {"t": "Ninguém se banha duas vezes no mesmo rio.", "a": "Heráclito"}, {"t": "Penso, logo existo.", "a": "René Descartes"}, {"t": "O coração tem razões que a própria razão desconhece.", "a": "Blaise Pascal"}, {"t": "Não são as coisas que perturbam os homens, mas as opiniões que eles têm sobre elas.", "a": "Epicteto"}, {"t": "Não é porque as coisas são difíceis que não ousamos; é porque não ousamos que elas são difíceis.", "a": "Sêneca"}, {"t": "Enquanto adiamos, a vida passa.", "a": "Sêneca"}, {"t": "Ousa saber!", "a": "Horácio (lema adotado por Kant)"}, {"t": "Há mais coisas entre o céu e a terra, Horácio, do que sonha a tua filosofia.", "a": "William Shakespeare, Hamlet"}, {"t": "Não existe nada bom ou mau, mas o pensamento o faz assim.", "a": "William Shakespeare, Hamlet"}, {"t": "Quem tem um porquê para viver suporta quase qualquer como.", "a": "Friedrich Nietzsche"}, {"t": "Ao vencido, ódio ou compaixão; ao vencedor, as batatas.", "a": "Machado de Assis, Quincas Borba"}, {"t": "Mudam-se os tempos, mudam-se as vontades.", "a": "Luís de Camões"}, {"t": "Tudo vale a pena se a alma não é pequena.", "a": "Fernando Pessoa, Mensagem"}, {"t": "Ler é sonhar pela mão de outrem.", "a": "Fernando Pessoa, Livro do Desassossego"}, {"t": "Um país se faz com homens e livros.", "a": "Monteiro Lobato"}, {"t": "Todas as famílias felizes se parecem; cada família infeliz é infeliz à sua maneira.", "a": "Liev Tolstói, Anna Kariênina"}, {"t": "O essencial é invisível aos olhos.", "a": "Antoine de Saint-Exupéry, O Pequeno Príncipe"}, {"t": "Navegar é preciso; viver não é preciso.", "a": "Frase dos navegantes antigos, retomada por Fernando Pessoa"}]</script>
 <style>
