@@ -35,6 +35,9 @@ jobs:
           node-version: "22"
       - name: Testar o servidor social
         run: node servidor-social/teste/teste.mjs
+      - name: Testar as bibliotecas (Wikisource e Internet Archive de verdade)
+        continue-on-error: true
+        run: node ferramentas/testar_fontes.mjs
       - name: Publicar na Cloudflare
         id: pub
         if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''

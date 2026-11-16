@@ -254,22 +254,44 @@ public class Servidor {
                 break;
             }
             case "/api/book": {
+                // livros de várias bibliotecas: Gutenberg (número), Wikisource (ws:...) e Internet Archive (ia:...)
                 String gid = p.q.get("gid");
-                if (gid == null || !gid.matches("[0-9]{1,9}")) { enviarJson(out, 400, "{\"error\":\"livro invalido\"}"); break; }
-                File f = new File(livros, gid + ".txt");
+                if (gid == null || !gid.matches("[A-Za-z0-9_.:\\-]{1,120}")) { enviarJson(out, 400, "{\"error\":\"livro invalido\"}"); break; }
+                File f = new File(livros, gid.replace(':', '_') + ".txt");
+                if (p.metodo.equals("POST")) {
+                    // texto montado pelo app (Wikisource junta os capítulos)
+                    if (p.corpo.length < 200 || p.corpo.length > 30_000_000) { enviarJson(out, 400, "{\"error\":\"texto invalido\"}"); break; }
+                    escrever(f, p.corpo);
+                    enviarJson(out, 200, "{\"ok\":true}");
+                    break;
+                }
                 if (!f.exists()) {
+                    String u = p.q.getOrDefault("u", "");
+                    if (u.isEmpty()) { enviarJson(out, 404, "{\"error\":\"livro ainda nao baixado\"}"); break; }
                     URI uri;
-                    try { uri = new URI(p.q.getOrDefault("u", "")); } catch (URISyntaxException e) { uri = null; }
+                    try { uri = new URI(u); } catch (URISyntaxException e) { uri = null; }
                     if (uri == null || uri.getHost() == null || !("https".equals(uri.getScheme()) || "http".equals(uri.getScheme()))
-                            || !uri.getHost().toLowerCase(Locale.ROOT).matches("(.*\\.)?gutenberg\\.org")) {
+                            || !uri.getHost().toLowerCase(Locale.ROOT).matches("(.*\\.)?(gutenberg\\.org|archive\\.org)")) {
                         enviarJson(out, 400, "{\"error\":\"endereco de livro nao permitido\"}"); break;
                     }
                     String texto = new String(baixar(uri.toString(), null, null), StandardCharsets.UTF_8);
-                    if (!texto.isEmpty() && texto.charAt(0) == '﻿') texto = texto.substring(1);
+                    if (!texto.isEmpty() && texto.charAt(0) == '\uFEFF') texto = texto.substring(1);
                     if (texto.length() < 500) throw new IOException("O texto baixado veio vazio.");
                     escrever(f, texto.getBytes(StandardCharsets.UTF_8));
                 }
                 enviar(out, 200, "text/plain; charset=utf-8", ler(f));
+                break;
+            }
+            case "/api/remote": {
+                // buscas nas bibliotecas abertas (só estes sites)
+                String u = p.q.getOrDefault("u", "");
+                URI uri;
+                try { uri = new URI(u); } catch (URISyntaxException e) { uri = null; }
+                if (uri == null || uri.getHost() == null || !"https".equals(uri.getScheme())
+                        || !uri.getHost().toLowerCase(Locale.ROOT).matches("([a-z\\-]+\\.wikisource\\.org|archive\\.org)")) {
+                    enviarJson(out, 400, "{\"error\":\"endereco nao permitido\"}"); break;
+                }
+                enviar(out, 200, "application/json; charset=utf-8", baixarComCache(u, 30 * 60_000L));
                 break;
             }
             case "/api/icon": {

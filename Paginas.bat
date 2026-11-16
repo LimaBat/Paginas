@@ -541,13 +541,23 @@ try {
       Send-Bytes $ctx 200 'application/json; charset=utf-8' $bytes
     }
     elseif ($path -eq '/api/book') {
-      $gid = $q['gid']
-      if ($gid -notmatch '^[0-9]{1,9}$') { Send-Json $ctx 400 '{"error":"livro invalido"}'; return }
-      $file = Join-Path $booksDir ($gid + '.txt')
+      # livros de várias bibliotecas: Gutenberg (número), Wikisource (ws:...) e Internet Archive (ia:...)
+      $gid = [string]$q['gid']
+      if ($gid -notmatch '^[A-Za-z0-9_.:\-]{1,120}$') { Send-Json $ctx 400 '{"error":"livro invalido"}'; return }
+      $file = Join-Path $booksDir (($gid -replace '[:]', '_') + '.txt')
+      if ($req.HttpMethod -eq 'POST') {
+        # texto montado pelo app (Wikisource junta os capitulos)
+        $body = Read-Body $req
+        if ($body.Length -lt 200 -or $body.Length -gt 30000000) { Send-Json $ctx 400 '{"error":"texto invalido"}'; return }
+        [IO.File]::WriteAllText($file, $body, $utf8)
+        Send-Json $ctx 200 '{"ok":true}'
+        return
+      }
       if (-not (Test-Path -LiteralPath $file)) {
         $u = $q['u']
+        if (-not $u) { Send-Json $ctx 404 '{"error":"livro ainda nao baixado"}'; return }
         $uri = $null
-        if (-not [Uri]::TryCreate($u, [UriKind]::Absolute, [ref]$uri) -or ($uri.Scheme -ne 'https' -and $uri.Scheme -ne 'http') -or ($uri.Host -notmatch '(^|\.)gutenberg\.org$')) {
+        if (-not [Uri]::TryCreate($u, [UriKind]::Absolute, [ref]$uri) -or ($uri.Scheme -ne 'https' -and $uri.Scheme -ne 'http') -or ($uri.Host -notmatch '(^|\.)(gutenberg\.org|archive\.org)$')) {
           Send-Json $ctx 400 '{"error":"endereco de livro nao permitido"}'; return
         }
         $raw = Get-Remote $u
@@ -557,6 +567,18 @@ try {
         [IO.File]::WriteAllText($file, $text, $utf8)
       }
       Send-Bytes $ctx 200 'text/plain; charset=utf-8' ([IO.File]::ReadAllBytes($file))
+    }
+    elseif ($path -eq '/api/remote') {
+      # buscas nas bibliotecas abertas (só estes sites)
+      $u = [string]$q['u']
+      $uri = $null
+      if (-not [Uri]::TryCreate($u, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or ($uri.Host -notmatch '^([a-z\-]+\.wikisource\.org|archive\.org)$')) {
+        Send-Json $ctx 400 '{"error":"endereco nao permitido"}'; return
+      }
+      $hit = $cache[$u]
+      if ($hit -and ((Get-Date) - $hit.t).TotalMinutes -lt 30) { $bytes = $hit.b }
+      else { $bytes = Get-Remote $u; $cache[$u] = @{ t = Get-Date; b = $bytes } }
+      Send-Bytes $ctx 200 'application/json; charset=utf-8' $bytes
     }
     elseif ($path -eq '/api/icon') {
       if (Test-Path -LiteralPath $pngFile) { Send-Bytes $ctx 200 'image/png' ([IO.File]::ReadAllBytes($pngFile)) }
@@ -1525,6 +1547,223 @@ async function fetchList(params) {
   const data = await gutendex(params);
   return (data.results || []).map(normBook).filter(b => b.textUrl);
 }
+
+/* ---------- outras bibliotecas gratuitas: Wikisource e Internet Archive ---------- */
+const WS_LANGS = { pt: 1, en: 1, es: 1, fr: 1, it: 1, de: 1 };
+const IA_LANG = { pt: 'por', en: 'eng', es: 'spa', fr: 'fre', it: 'ita', de: 'ger' };
+const IA_LANG_VOLTA = { por: 'pt', portuguese: 'pt', eng: 'en', english: 'en', spa: 'es', spanish: 'es', fre: 'fr', fra: 'fr', french: 'fr', ita: 'it', italian: 'it', ger: 'de', deu: 'de', german: 'de' };
+const FONTE_NOME = { wikisource: 'Wikisource', archive: 'Internet Archive', '': 'Gutenberg' };
+async function remoto(url) { return (await api('/api/remote?u=' + encodeURIComponent(url))).json(); }
+function langsBusca() {
+  const l = lib.lang === 'mine' ? userLangs() : (lib.lang ? [lib.lang] : ['pt', 'en', 'es']);
+  return l.length ? l : ['pt'];
+}
+const umTexto = v => Array.isArray(v) ? v[0] : (v || '');
+function hashCurto(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36); }
+function autorDoCabecalho(wt) {
+  wt = String(wt || '').slice(0, 6000);
+  let m = wt.match(/\|\s*(?:autor|author|auteur|autore|autor_nome)\s*=\s*(?:\[\[\s*(?:Autor|Author|Auteur|Autore)\s*:\s*)?([^|\]\n}]+)/i)
+    || wt.match(/\[\[\s*(?:Autor|Author|Auteur|Autore)\s*:\s*([^|\]]+)/i);
+  return m ? m[1].trim() : '';
+}
+async function buscaWikisource(q, langs) {
+  const out = [];
+  await Promise.all(langs.filter(l => WS_LANGS[l]).slice(0, 3).map(async l => {
+    const base = `https://${l}.wikisource.org/w/api.php`;
+    const j = await remoto(`${base}?action=query&format=json&list=search&srnamespace=0&srlimit=30&srprop=&srsearch=${encodeURIComponent(q)}`);
+    const titulos = ((j.query && j.query.search) || []).map(x => x.title).filter(t => !t.includes('/')).slice(0, 12);
+    if (!titulos.length) return;
+    let autores = {};
+    try {
+      const k = await remoto(`${base}?action=query&format=json&prop=revisions&rvprop=content&rvslots=main&titles=${encodeURIComponent(titulos.join('|'))}`);
+      for (const pg of Object.values((k.query && k.query.pages) || {})) {
+        const rv = pg.revisions && pg.revisions[0];
+        const wt = rv && (rv.slots ? (rv.slots.main['*'] || rv.slots.main.content) : rv['*']);
+        autores[pg.title] = autorDoCabecalho(wt);
+      }
+    } catch (e) {}
+    for (const t of titulos) {
+      const b = { gid: 'ws:' + l + ':' + hashCurto(t), title: t, author: autores[t] || '', lang: l, downloads: 0, textUrl: '', cover: '', fonte: 'wikisource', ws: { lang: l, title: t } };
+      GCACHE[b.gid] = b; out.push(b);
+    }
+  }));
+  return out;
+}
+async function buscaArchive(q, langs) {
+  const limpo = q.replace(/[()[\]{}:"\\/^~*?!+\-]/g, ' ').trim();
+  if (!limpo) return [];
+  const L = langs.map(l => IA_LANG[l]).filter(Boolean);
+  const query = `(title:(${limpo}) OR creator:(${limpo})) AND mediatype:texts` + (L.length ? ` AND language:(${L.join(' OR ')})` : '') +
+    ' AND NOT collection:(inlibrary OR printdisabled OR lendinglibrary OR gutenberg)';
+  const u = 'https://archive.org/advancedsearch.php?q=' + encodeURIComponent(query) +
+    '&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=language&fl[]=downloads&fl[]=year&rows=24&page=1&sort[]=downloads+desc&output=json';
+  const j = await remoto(u);
+  return ((j.response && j.response.docs) || []).filter(d => d.identifier && d.title).map(d => {
+    const lg = String(umTexto(d.language)).toLowerCase();
+    const b = { gid: 'ia:' + d.identifier, title: umTexto(d.title), author: umTexto(d.creator), lang: IA_LANG_VOLTA[lg] || (lg.length <= 3 ? lg.slice(0, 2) : ''), downloads: d.downloads || 0,
+      textUrl: '', cover: 'https://archive.org/services/img/' + encodeURIComponent(d.identifier), fonte: 'archive', ia: d.identifier, ano: d.year || '' };
+    GCACHE[b.gid] = b; return b;
+  });
+}
+async function buscaExtras(q, langs) {
+  const [ws, ia] = await Promise.all([buscaWikisource(q, langs).catch(() => null), buscaArchive(q, langs).catch(() => null)]);
+  return { ws, ia };
+}
+
+/* texto completo de um livro da Wikisource: junta os capítulos na ordem do sumário */
+function htmlParaTexto(raiz) {
+  raiz.querySelectorAll('style, script, sup, .reference, .references, .mw-editsection, .noprint, .ws-noexport, .navbox, .metadata, #toc, .toc, .mw-empty-elt, [class*="header"], [id*="header"], [class*="cabecalho"], [class*="naveg"], .ws-pagenum, .pagenum, .ws-summary').forEach(e => e.remove());
+  raiz.querySelectorAll('br').forEach(e => e.replaceWith('\n'));
+  raiz.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(e => { e.textContent = '\n\n' + e.textContent.trim().toUpperCase() + '\n\n'; });
+  raiz.querySelectorAll('p, div, li, dd, dt, blockquote, tr, pre').forEach(e => e.append('\n\n'));
+  return raiz.textContent.replace(/[ \t ]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+async function paginaWikisource(lang, titulo) {
+  const j = await remoto(`https://${lang}.wikisource.org/w/api.php?action=parse&format=json&prop=text&disableeditsection=1&redirects=1&page=${encodeURIComponent(titulo)}`);
+  if (!j.parse) throw new Error('Não encontrei este livro na Wikisource.');
+  const html = j.parse.text['*'] || j.parse.text;
+  return { doc: new DOMParser().parseFromString('<div id="r">' + html + '</div>', 'text/html'), titulo: j.parse.title || titulo };
+}
+async function textoWikisource(ws, aviso) {
+  const { doc, titulo } = await paginaWikisource(ws.lang, ws.title);
+  const pref = '/wiki/' + titulo.replace(/ /g, '_') + '/';
+  const caps = [], vistos = new Set();
+  doc.querySelectorAll('#r a[href]').forEach(a => {
+    let h = a.getAttribute('href') || '';
+    try { h = decodeURIComponent(h); } catch (e) {}
+    h = h.split('#')[0];
+    if (h.startsWith(pref) && !vistos.has(h)) { vistos.add(h); caps.push({ t: h.slice(6).replace(/_/g, ' '), nome: a.textContent.trim() }); }
+  });
+  if (caps.length < 2) return htmlParaTexto(doc.getElementById('r'));
+  const partes = new Array(caps.length);
+  let feitos = 0;
+  for (let i = 0; i < caps.length; i += 4) {
+    await Promise.all(caps.slice(i, i + 4).map(async (c, k) => {
+      try {
+        const p = await paginaWikisource(ws.lang, c.t);
+        const tx = htmlParaTexto(p.doc.getElementById('r'));
+        const nome = (c.nome || c.t.split('/').pop()).toUpperCase();
+        partes[i + k] = (tx.slice(0, 200).toUpperCase().includes(nome.slice(0, 30)) ? '' : nome + '\n\n') + tx;
+      } catch (e) { partes[i + k] = ''; }
+      feitos++;
+      if (aviso) aviso(`Juntando os capítulos da Wikisource… ${feitos} de ${caps.length}`);
+    }));
+  }
+  return partes.filter(Boolean).join('\n\n\n');
+}
+/* Internet Archive: acha o arquivo de texto (só de itens livres) */
+async function urlTextoArchive(id) {
+  const m = await remoto('https://archive.org/metadata/' + encodeURIComponent(id));
+  const md = m.metadata || {};
+  if (m.is_dark || String(md['access-restricted-item']) === 'true') throw new Error('Este livro do Internet Archive só pode ser emprestado no site deles; o texto não é livre para ler aqui.');
+  const fs = m.files || [];
+  const f = fs.find(x => /_djvu\.txt$/i.test(x.name)) || fs.find(x => x.format === 'DjVuTXT') || fs.find(x => /\.txt$/i.test(x.name) && !/(_meta|_files|_reviews|_chocr|_hocr)/i.test(x.name));
+  if (!f) throw new Error('Este item do Internet Archive não tem o texto digitalizado para ler.');
+  return 'https://archive.org/download/' + encodeURIComponent(id) + '/' + f.name.split('/').map(encodeURIComponent).join('/');
+}
+function limpaOCR(t) {
+  return t.replace(/\r\n?/g, '\n')
+    .replace(/([A-Za-zÀ-ÿ])[-¬]\n[ \t]*([a-zà-ÿ])/g, '$1$2')
+    .split('\n').filter(l => !/^\s*([0-9]{1,4}|[ivxlcdm]{1,7})\s*$/i.test(l)).join('\n')
+    .replace(/\n{3,}/g, '\n\n');
+}
+async function livroCache(gid) {
+  const r = await fetch('/api/book?gid=' + encodeURIComponent(gid) + '&t=' + API.token);
+  return r.ok ? r.text() : null;
+}
+async function textoDoLivro(b, aviso) {
+  if (!b.fonte || /^[0-9]+$/.test(String(b.gid))) {
+    return (await api('/api/book?gid=' + b.gid + '&u=' + encodeURIComponent(b.textUrl || ''))).text();
+  }
+  const ja = await livroCache(b.gid);
+  if (ja) return ja;
+  if (b.fonte === 'wikisource') {
+    const t = await textoWikisource(b.ws, aviso);
+    if (!t || t.length < 300) throw new Error('A Wikisource não trouxe o texto deste livro.');
+    try { await api('/api/book?gid=' + encodeURIComponent(b.gid), { method: 'POST', headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: t }); } catch (e) {}
+    return t;
+  }
+  if (b.fonte === 'archive') {
+    const u = await urlTextoArchive(b.ia);
+    return (await api('/api/book?gid=' + encodeURIComponent(b.gid) + '&u=' + encodeURIComponent(u))).text();
+  }
+  throw new Error('Não sei de onde baixar este livro.');
+}
+
+/* ---------- ortografia atual (livros em português escritos antes das reformas de 1911/1943) ---------- */
+const ORTO_PALAVRA = {
+  'elle': 'ele', 'ella': 'ela', 'elles': 'eles', 'ellas': 'elas', 'aquelle': 'aquele', 'aquella': 'aquela', 'aquelles': 'aqueles', 'aquellas': 'aquelas', 'aquillo': 'aquilo',
+  "d'elle": 'dele', "d'ella": 'dela', "d'elles": 'deles', "d'ellas": 'delas', "n'elle": 'nele', "n'ella": 'nela', "n'elles": 'neles', "n'ellas": 'nelas',
+  "d'aquelle": 'daquele', "d'aquella": 'daquela', "d'aquelles": 'daqueles', "d'aquellas": 'daquelas', "d'aquillo": 'daquilo', "n'aquelle": 'naquele', "n'aquella": 'naquela', "n'aquillo": 'naquilo',
+  "d'este": 'deste', "d'esta": 'desta', "d'estes": 'destes', "d'estas": 'destas', "d'esse": 'desse', "d'essa": 'dessa', "d'esses": 'desses', "d'essas": 'dessas', "d'isto": 'disto', "d'isso": 'disso',
+  "n'este": 'neste', "n'esta": 'nesta', "n'estes": 'nestes', "n'estas": 'nestas', "n'esse": 'nesse', "n'essa": 'nessa', "n'esses": 'nesses', "n'essas": 'nessas', "n'isto": 'nisto', "n'isso": 'nisso',
+  "n'um": 'num', "n'uma": 'numa', "n'uns": 'nuns', "n'umas": 'numas', "d'um": 'de um', "d'uma": 'de uma', "d'uns": 'de uns', "d'umas": 'de umas', "d'ahi": 'daí', "d'aqui": 'daqui', "d'ali": 'dali', "d'alli": 'dali', "d'onde": 'donde', "d'outro": 'de outro', "d'outra": 'de outra', "d'outros": 'de outros', "d'outras": 'de outras', "d'elle": 'dele',
+  'ha': 'há', 'á': 'à', 'ás': 'às', 'hontem': 'ontem', 'pae': 'pai', 'paes': 'pais', 'mãi': 'mãe', 'mãis': 'mães', 'sómente': 'somente', 'emfim': 'enfim', 'emquanto': 'enquanto', 'comtudo': 'contudo', 'comquanto': 'conquanto',
+  'tambem': 'também', 'alguem': 'alguém', 'ninguem': 'ninguém', 'alem': 'além', 'aquem': 'aquém', 'porem': 'porém', 'armazem': 'armazém', 'vintem': 'vintém', 'desdem': 'desdém',
+  'portuguez': 'português', 'portugueza': 'portuguesa', 'portuguezes': 'portugueses', 'portuguezas': 'portuguesas', 'inglez': 'inglês', 'ingleza': 'inglesa', 'inglezes': 'ingleses', 'francez': 'francês', 'franceza': 'francesa', 'francezes': 'franceses', 'hollandez': 'holandês',
+  'mez': 'mês', 'mezes': 'meses', 'paiz': 'país', 'paizes': 'países', 'atraz': 'atrás', 'quiz': 'quis', 'puz': 'pus', 'poz': 'pôs', 'quizesse': 'quisesse', 'quizer': 'quiser', 'quizeram': 'quiseram', 'puzesse': 'pusesse', 'puzer': 'puser', 'luiz': 'luís', 'thereza': 'teresa', 'izabel': 'isabel',
+  'princeza': 'princesa', 'princezas': 'princesas', 'duqueza': 'duquesa', 'condeza': 'condessa', 'baroneza': 'baronesa', 'marqueza': 'marquesa', 'marquez': 'marquês', 'defeza': 'defesa', 'despeza': 'despesa', 'empreza': 'empresa', 'emprezas': 'empresas', 'surpreza': 'surpresa', 'camponeza': 'camponesa', 'burguez': 'burguês', 'cortez': 'cortês', 'brazil': 'brasil',
+  'caracter': 'caráter', 'cahir': 'cair', 'sahir': 'sair', 'trahir': 'trair', 'sahiu': 'saiu', 'cahiu': 'caiu', 'sahida': 'saída', 'cahida': 'caída', 'sahe': 'sai', 'cahe': 'cai', 'comprehender': 'compreender', 'comprehendeu': 'compreendeu', 'prohibir': 'proibir', 'prohibido': 'proibido', 'vehemente': 'veemente',
+  'êste': 'este', 'êsse': 'esse', 'êle': 'ele', 'aquêle': 'aquele', 'fôra': 'fora', 'fôsse': 'fosse', 'fôram': 'foram', 'sôbre': 'sobre', 'dôr': 'dor', 'côr': 'cor', 'côres': 'cores', 'êsses': 'esses', 'êstes': 'estes', 'êles': 'eles',
+  'tecnica': 'técnica', 'maquina': 'máquina', 'maquinas': 'máquinas', 'aza': 'asa', 'azas': 'asas', 'cousa': 'coisa', 'cousas': 'coisas', 'dous': 'dois', 'oiro': 'ouro', 'loiro': 'louro'
+};
+// pedaços de palavras (aplicados antes das regras de letras)
+const ORTO_TRECHO = [
+  [/^brazil/, 'brasil'], [/^sciencia/, 'ciencia'], [/^scien/, 'cien'], [/^scena/, 'cena'], [/^scen/, 'cen'], [/^augment/, 'aument'], [/^(somn|outomn)o/, (m, a) => a === 'somn' ? 'sono' : 'outono'], [/^column/, 'colun'], [/^solemn/, 'solen'], [/^damn/, 'dan'], [/^condemn/, 'conden'], [/^hymn/, 'hin'],
+  [/^(effect|affect|afect|direct|exact|object|project|traject|dialect|adject|correct|collect|select|protect|architect|redact|inspect(?=or))/, m => m.replace(/ct$/, 't')],
+  [/^(acto|actos|actual|actuaes|actualmente|activ|actriz|acção|acções|reacção|direcção|protecção|correcção|collecção|selecção|redacção|facto|factos)/, m => m.replace('ct', 't').replace('cç', 'ç')],
+  [/^(escript|baptis|prompt|assumpt|septemb|adopt|egypt)/, m => ({ escript: 'escrit', baptis: 'batis', prompt: 'pront', assumpt: 'assunt', septemb: 'setemb', adopt: 'adot', egypt: 'egit' })[m]],
+  [/^chr/, 'cr'], [/^monarch/, 'monarqu'], [/^archi/, 'arqui'], [/^orchest/, 'orquest'], [/^chaos/, 'caos'], [/^melanchol/, 'melancol'], [/^chim/, 'quim'], [/^machin/, 'maquin'], [/^echo/, 'eco'], [/^technic/, 'tecnic'],
+  [/^hombro/, 'ombro'], [/^humid/, 'umid'], [/^herva/, 'erva'], [/^circum(?=[bcdfgjklmpqrstvxz])/, 'circun']
+];
+// acentos que a grafia antiga não usava (só palavras sem ambiguidade)
+const ORTO_ACENTO = {};
+('história histórias glória glórias memória memórias vitória vitórias lágrima lágrimas página páginas sábado sábados último última últimos últimas único única únicos únicas ' +
+ 'público pública públicos públicas política políticas político políticos música músicas número números química técnica crônica crônicas lâmpada lâmpadas árvore árvores pássaro pássaros ' +
+ 'médico médica médicos rápido rápida rápidos rápidas próximo próxima próximos próximas espírito espíritos século séculos título títulos lógica matemática mágico mágica ' +
+ 'trágico trágica cômico cômica poético poética histórico histórica católico católica sólido sólida pálido pálida pálidos pálidas tímido tímida úmido úmida próprio própria próprios próprias ' +
+ 'necessário necessária necessários necessárias contrário contrária ordinário extraordinário extraordinária vários várias diário diária salário ciência ciências paciência experiência ' +
+ 'existência consciência essência inocência excelência violência aparência conveniência independência residência frequência eloquência diligência importância distância infância ' +
+ 'ignorância abundância circunstância circunstâncias constância elegância arrogância tolerância fácil fáceis difícil difíceis útil úteis inútil inúteis débil dócil fértil hábil ágil frágil ' +
+ 'móvel nível também véspera víbora cântico sílaba sílabas lâmina pérola pérolas cólera êxito ânimo ânimos ídolo ídolos índio índios ' +
+ 'máquina máquinas sábio sábios mísero mísera miséria misérias família famílias negócio negócios silêncio silêncios princípio princípios ofício ofícios edifício edifícios sacrifício ' +
+ 'notícia notícias polícia malícia justiça série séries espécie espécies superfície água águas régua tênue órfão órfã órgão órgãos sótão bênção ' +
+ 'ministério ministérios remédio remédios farmácia farmácias lírio lírios capítulo capítulos mistério mistérios império impérios comércio sítio sítios início exército exércitos ' +
+ 'lábio lábios parágrafo parágrafos pálpebra pálpebras cântaro sândalo âmbar mármore mármores ônix túmulo túmulos cálice cálices espátula pântano pântanos ' +
+ 'período períodos episódio episódios relógio relógios colégio colégios privilégio privilégios vício vícios cemitério oráculo milagre hóspede hóspedes lâmpada órbita gênio gênios')
+  .split(' ').forEach(p => { const b = p.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/ç/g, 'ç'); if (b !== p) ORTO_ACENTO[b] = p; });
+['justica', 'agua', 'aguas', 'magoa', 'magoas', 'regua', 'bencao', 'orgao', 'orgaos', 'orfao', 'orfa', 'sotao', 'tenue'].forEach(k => delete ORTO_ACENTO[k]);
+Object.assign(ORTO_ACENTO, { 'agua': 'água', 'aguas': 'águas', 'orgão': 'órgão', 'orgãos': 'órgãos', 'orphão': 'órfão', 'orfão': 'órfão', 'benção': 'bênção', 'sotão': 'sótão' });
+function ortoPalavra(w) {
+  const lw = w.toLowerCase();
+  let r = ORTO_PALAVRA[lw];
+  if (!r) {
+    r = lw;
+    for (const [re, sub] of ORTO_TRECHO) if (re.test(r)) { r = r.replace(re, sub); break; }
+    r = r.replace(/ph/g, 'f').replace(/th/g, 't').replace(/rh/g, 'r').replace(/y/g, 'i')
+      .replace(/([bdfglmnpt])\1/g, '$1').replace(/cc(?=[aouáóú])/g, 'c').replace(/cc(?=[eiéí])/g, 'c')
+      .replace(/(^|[^aeiouáéíóúâêôãõ])c[cç](?=ão|ões)/g, '$1ç');
+    r = r.replace(/([a-z])avel$/, '$1ável').replace(/([a-z])aveis$/, '$1áveis').replace(/([a-z])ivel$/, '$1ível').replace(/([a-z])iveis$/, '$1íveis');
+    r = ORTO_ACENTO[r] || ORTO_PALAVRA[r] || r;
+  }
+  if (r === lw) return w;
+  if (w === w.toUpperCase() && w.length > 1) return r.toUpperCase();
+  if (w[0] === w[0].toUpperCase()) return r.charAt(0).toUpperCase() + r.slice(1);
+  return r;
+}
+function modernizar(t) {
+  return t.replace(/[A-Za-zÀ-ÿ]+(?:'[A-Za-zÀ-ÿ]+)?/g, w => {
+    if (/[ç]/.test(w) && !/cç/i.test(w) && !/(ph|th|y|ll|mm|nn|tt|pp|ff|cc)/i.test(w)) return ORTO_PALAVRA[w.toLowerCase()] ? ortoPalavra(w) : w;
+    return ortoPalavra(w);
+  });
+}
+const ortoLigada = () => !state.prefs || state.prefs.orto !== false;
+function livroEmPortugues(b, texto) {
+  if (b.lang) return b.lang === 'pt';
+  const amostra = texto.slice(2000, 12000).toLowerCase();
+  return (amostra.match(/\b(que|não|para|uma|com|elle|ella)\b/g) || []).length > 60;
+}
+
 const shelfBook = gid => state.books.find(b => b.gid === gid);
 
 function tile(g) {
@@ -1542,7 +1781,7 @@ function addToShelf(g, status) {
   let b = shelfBook(g.gid);
   if (b) return b;
   b = { id: 'g' + g.gid, gid: g.gid, title: g.title, author: g.author, totalPages: 0, currentPage: 0, rp: 0,
-    status, addedAt: new Date().toISOString(), finishedAt: null, rating: 0, note: '', textUrl: g.textUrl, lang: g.lang };
+    status, addedAt: new Date().toISOString(), finishedAt: null, rating: 0, note: '', textUrl: g.textUrl, lang: g.lang, fonte: g.fonte || undefined, ws: g.ws || undefined, ia: g.ia || undefined, cover: g.cover || undefined };
   state.books.push(b);
   return b;
 }
@@ -1558,7 +1797,16 @@ async function libSearch(reset) {
     const langs = lib.lang === 'mine' ? userLangs().join(',') : lib.lang;
     if (langs) params.languages = langs;
     if (lib.topic) params.topic = lib.topic;
-    const data = await gutendex(params);
+    if (lib.page === 1) {
+      lib.extra = null;
+      if (lib.q.trim()) {
+        lib.extraLoading = true;
+        const q = lib.q.trim();
+        buscaExtras(q, langsBusca()).then(x => { if (lib.q.trim() === q) { lib.extra = x; lib.extraLoading = false; if (view === 'library') render(); } });
+      }
+    }
+    let data = { results: [] };
+    try { data = await gutendex(params); } catch (e) { if (!lib.q.trim()) throw e; lib.gutErro = e.message; }
     const items = (data.results || []).map(normBook).filter(b => b.textUrl);
     lib.items = lib.items.concat(items);
     lib.hasMore = !!data.next;
@@ -1573,7 +1821,7 @@ function renderLibrary() {
   return `
   <section class="card">
     <h2>Biblioteca virtual</h2>
-    <p class="muted small" style="margin-top:0">Livros reais de domínio público (Projeto Gutenberg), gratuitos para ler aqui dentro. Seu progresso fica salvo.</p>
+    <p class="muted small" style="margin-top:0">Livros reais de domínio público, gratuitos para ler aqui dentro, de três bibliotecas: Projeto Gutenberg, Wikisource e Internet Archive. Seu progresso fica salvo.</p>
     <form id="libForm" class="row">
       <label style="flex:3">Buscar por título ou autor<input id="libQ" data-xin="libq" value="${esc(lib.q)}" placeholder="ex.: Machado de Assis, Dom Casmurro, Sherlock"></label>
       <label>Idioma<select data-xin="liblang">${langOpts}</select></label>
@@ -1582,10 +1830,19 @@ function renderLibrary() {
     <div class="gchips">${chips}</div>
   </section>
   ${lib.error ? `<div class="card empty">${esc(lib.error)}<br><br><button class="btn" data-x="libretry">Tentar de novo</button></div>` : ''}
+  ${lib.q.trim() && (lib.items.length || lib.extra || lib.extraLoading) ? '<h3 class="fonteh">📘 Projeto Gutenberg</h3>' : ''}
   ${lib.items.length ? `<div class="bgrid">${lib.items.map(tile).join('')}</div>` : ''}
   ${lib.loading ? '<p class="empty">Carregando…</p>' : ''}
-  ${!lib.loading && !lib.error && !lib.items.length ? '<div class="card empty">Nenhum livro encontrado. Tente outra busca ou outro idioma.</div>' : ''}
-  ${lib.hasMore && !lib.loading ? '<p class="center"><button class="btn" data-x="libmore">Carregar mais</button></p>' : ''}`;
+  ${!lib.loading && !lib.error && !lib.items.length ? `<div class="card empty">${lib.q.trim() ? 'Nada com essa busca no Projeto Gutenberg.' : 'Nenhum livro encontrado. Tente outra busca ou outro idioma.'}</div>` : ''}
+  ${lib.hasMore && !lib.loading ? '<p class="center"><button class="btn" data-x="libmore">Carregar mais</button></p>' : ''}
+  ${lib.q.trim() ? secaoExtra('📜 Wikisource', 'Textos revisados por voluntários; muitos clássicos brasileiros e portugueses.', lib.extra && lib.extra.ws) +
+    secaoExtra('🏛️ Internet Archive', 'Livros digitalizados de bibliotecas do mundo todo. O texto vem do escaneamento das páginas e pode ter pequenos erros.', lib.extra && lib.extra.ia) : ''}`;
+}
+function secaoExtra(tit, desc, l) {
+  if (lib.extraLoading) return `<h3 class="fonteh">${tit}</h3><p class="empty">Procurando…</p>`;
+  if (!lib.extra) return '';
+  if (l === null) return `<h3 class="fonteh">${tit}</h3><p class="muted small">Não consegui procurar nesta biblioteca agora.</p>`;
+  return `<h3 class="fonteh">${tit}</h3><p class="muted small" style="margin:-.3rem 0 .6rem">${desc}</p>` + (l.length ? `<div class="bgrid">${l.map(tile).join('')}</div>` : '<p class="muted small">Nada encontrado aqui.</p>');
 }
 
 /* ---------- aba Para você (recomendados) ---------- */
@@ -1707,8 +1964,11 @@ async function openReader(id) {
   R = null;
   readerMsg(b, '<p>Preparando o livro… Na primeira vez ele é baixado e fica guardado no computador para ler offline depois.</p>');
   try {
-    const r = await api('/api/book?gid=' + b.gid + '&u=' + encodeURIComponent(b.textUrl || ''));
-    const pages = paginate(stripGutenberg(await r.text()));
+    let texto = await textoDoLivro(b, msg => readerMsg(b, '<p>' + esc(msg) + '</p>'));
+    texto = stripGutenberg(texto);
+    if (b.fonte === 'archive') texto = limpaOCR(texto);
+    const pages = paginate(texto);
+    if (ortoLigada() && livroEmPortugues(b, texto)) for (const pg of pages) for (const x of pg) x.t = modernizar(x.t);
     if (!pages.length) throw new Error('Não consegui ler o texto deste livro.');
     b.totalPages = pages.length;
     let idx = Math.max(0, Math.min(pages.length - 1, b.rp != null ? b.rp : (b.currentPage || 0)));
@@ -1734,6 +1994,7 @@ function renderPage() {
       <button class="btn sm" data-x="rfont" data-v="-1" title="Diminuir letra">A−</button>
       <button class="btn sm" data-x="rfont" data-v="1" title="Aumentar letra">A+</button>
       <button class="btn sm" data-x="rtheme" title="Trocar tema">Tema</button>
+      ${b.lang === 'pt' || !b.lang ? `<button class="btn sm ${ortoLigada() ? 'on' : ''}" data-g="orto" title="${ortoLigada() ? 'Mostrando a ortografia atual. Toque para ver a grafia original do livro' : 'Mostrando a grafia original. Toque para ver com a ortografia atual'}">Abc</button>` : ''}
       <button class="btn sm" data-x="hllist" title="Seus grifos neste livro">🖍 ${(b.hl || []).length}</button>
     </div>
     <div class="rbody" id="rbody"><article style="font-size:${pr.size}px">${body}</article></div>
@@ -1841,8 +2102,8 @@ document.addEventListener('click', e => {
     case 'go': view = v; render(); break;
     case 'read': openReader(id); break;
     case 'rretry': openReader(id); break;
-    case 'readg': { const g = GCACHE[Number(id)]; if (!g) break; const b = addToShelf(g, 'reading'); if (b.status === 'want') b.status = 'reading'; Store.save(state); openReader(b.id); break; }
-    case 'addg': { const g = GCACHE[Number(id)]; if (!g) break; addToShelf(g, 'want'); commit(); toast('Adicionado à estante (Quero ler).'); break; }
+    case 'readg': { const g = GCACHE[id]; if (!g) break; const b = addToShelf(g, 'reading'); if (b.status === 'want') b.status = 'reading'; Store.save(state); openReader(b.id); break; }
+    case 'addg': { const g = GCACHE[id]; if (!g) break; addToShelf(g, 'want'); commit(); toast('Adicionado à estante (Quero ler).'); break; }
     case 'libtopic': lib.topic = lib.topic === id ? '' : id; libSearch(true); break;
     case 'libmore': lib.page++; libSearch(false); break;
     case 'libretry': libSearch(lib.items.length === 0); break;
@@ -2160,7 +2421,10 @@ function searchFor(q, langs) {
   addRecent(q); render(); window.scrollTo(0, 0); libSearch(true);
 }
 function resRow(g) {
-  return `<article class="srow">${coverHtml(g)}<div style="min-width:0"><h4>${esc(g.title)}</h4><div class="muted">${esc(g.author)}${g.lang ? `<span class="tag">${esc(g.lang.toUpperCase())}</span>` : ''}</div><div class="muted">${g.downloads.toLocaleString('pt-BR')} downloads</div><div class="bookact">${tileAct(g)}</div></div></article>`;
+  const tit = ortoLigada() && g.lang === 'pt' ? modernizar(g.title) : g.title;
+  const capa = g.fonte === 'archive' && g.cover ? `<div class="cover"><img src="${esc(g.cover)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()"><span>${esc(tit)}</span></div>` : coverHtml(g);
+  const info = g.fonte ? esc(FONTE_NOME[g.fonte]) + (g.ano ? ' · ' + esc(String(g.ano)) : '') : (g.downloads || 0).toLocaleString('pt-BR') + ' downloads';
+  return `<article class="srow">${capa}<div style="min-width:0"><h4>${esc(tit)}</h4><div class="muted">${esc(g.author || '')}${g.lang ? `<span class="tag">${esc(g.lang.toUpperCase())}</span>` : ''}${g.fonte ? `<span class="tag fonte">${esc(FONTE_NOME[g.fonte])}</span>` : ''}</div><div class="muted">${info}</div><div class="bookact">${tileAct(g)}</div></div></article>`;
 }
 function libResults() {
   ensure();
@@ -2174,8 +2438,17 @@ function libResults() {
   ${lib.error ? `<div class="card empty">${esc(lib.error)}<br><br><button class="btn" data-x="libretry">Tentar de novo</button></div>` : ''}
   ${lib.items.length ? `<h3 class="sechead">${q ? 'Resultados' : 'Em alta na biblioteca'}${lib.total ? ` <span class="muted small">(${lib.total.toLocaleString('pt-BR')})</span>` : ''}</h3><div class="srows">${lib.items.map(resRow).join('')}</div>` : ''}
   ${lib.loading ? '<p class="empty">Buscando…</p>' : ''}
-  ${!lib.loading && !lib.error && !lib.items.length ? '<div class="card empty">Nenhum livro encontrado. Tente outro título, o sobrenome do autor ou outro idioma.</div>' : ''}
-  ${lib.hasMore && !lib.loading ? '<p class="center"><button class="btn" data-x="libmore">Carregar mais</button></p>' : ''}`;
+  ${!lib.loading && !lib.error && !lib.items.length ? `<div class="card empty">${q ? 'Nada com essa busca no Projeto Gutenberg.' : 'Nenhum livro encontrado. Tente outro título, o sobrenome do autor ou outro idioma.'}</div>` : ''}
+  ${lib.hasMore && !lib.loading ? '<p class="center"><button class="btn" data-x="libmore">Carregar mais</button></p>' : ''}
+  ${q ? extraRows('📜 Na Wikisource', 'Textos revisados por voluntários, com muitos clássicos brasileiros e portugueses.', lib.extra && lib.extra.ws) +
+    extraRows('🏛️ No Internet Archive', 'Livros digitalizados de bibliotecas do mundo todo. O texto vem do escaneamento das páginas e pode ter pequenos erros.', lib.extra && lib.extra.ia) : ''}`;
+}
+function extraRows(tit, desc, l) {
+  if (lib.extraLoading) return `<h3 class="sechead">${tit}</h3><p class="empty">Procurando…</p>`;
+  if (!lib.extra) return '';
+  if (l === null) return `<h3 class="sechead">${tit}</h3><p class="muted small">Não consegui procurar nesta biblioteca agora. Tente de novo daqui a pouco.</p>`;
+  return `<h3 class="sechead">${tit}${l.length ? ` <span class="muted small">(${l.length})</span>` : ''}</h3><p class="muted small" style="margin:-.2rem 0 .6rem">${desc}</p>` +
+    (l.length ? `<div class="srows">${l.map(resRow).join('')}</div>` : '<p class="muted small">Nada encontrado aqui.</p>');
 }
 function libPaint() {
   if (view !== 'library') return;
@@ -2191,7 +2464,16 @@ libSearch = async function (reset) {
     const langs = lib.lang === 'mine' ? userLangs().join(',') : lib.lang;
     if (langs) params.languages = langs;
     if (lib.topic) params.topic = lib.topic;
-    const data = await gutendex(params);
+    if (lib.page === 1) {
+      lib.extra = null; lib.extraLoading = false;
+      const q = lib.q.trim();
+      if (q) {
+        lib.extraLoading = true;
+        buscaExtras(q, langsBusca()).then(x => { if (my === lib.req) { lib.extra = x; lib.extraLoading = false; libPaint(); } });
+      }
+    }
+    let data = { results: [] };
+    try { data = await gutendex(params); } catch (e) { if (!lib.q.trim()) throw e; }
     if (my !== lib.req) return;
     lib.items = lib.items.concat((data.results || []).map(normBook).filter(b => b.textUrl));
     lib.hasMore = !!data.next; lib.total = data.count || 0;
@@ -2202,7 +2484,7 @@ function renderLibrary2() {
   if (!lib.started) { lib.started = true; setTimeout(() => libSearch(true), 0); }
   const langOpts = [['mine', 'Meus idiomas'], ['', 'Todos']].concat(LANGS.map(l => [l.id, l.label])).map(([v, l]) => `<option value="${v}" ${lib.lang === v ? 'selected' : ''}>${l}</option>`).join('');
   return `<section class="card"><h2>Pesquisar livros</h2>
-    <p class="muted small" style="margin-top:0">Busque por título ou autor na biblioteca virtual (Projeto Gutenberg). Livros gratuitos para ler aqui dentro, com o progresso salvo.</p>
+    <p class="muted small" style="margin-top:0">Busque por título ou autor em três bibliotecas gratuitas: Projeto Gutenberg, Wikisource e Internet Archive. Os livros abrem aqui dentro, com o progresso salvo.</p>
     <form id="libForm" class="row"><label style="flex:3">Título ou autor<input id="libQ" type="search" data-xin="libq" value="${esc(lib.q)}" placeholder="ex.: Machado de Assis, Dom Casmurro, Sherlock" autocomplete="off"></label>
     <label>Idioma<select data-xin="liblang">${langOpts}</select></label><button class="btn primary" type="submit">Buscar</button></form></section>
   <div id="sres">${libResults()}</div>`;
@@ -2337,8 +2619,10 @@ function cv(g) {
 }
 coverHtml = cv;
 tile = function (g) {
-  return `<article class="tile">${cv(g)}<div class="tt" title="${esc(g.title)}">${esc(g.title)}</div>
-    <div class="au">${esc(g.author)}${g.lang ? `<span class="tag">${esc(g.lang.toUpperCase())}</span>` : ''}</div><div class="tact">${tileAct(g)}</div></article>`;
+  const tit = ortoLigada() && g.lang === 'pt' ? modernizar(g.title) : g.title;
+  const capa = g.fonte === 'archive' && g.cover ? `<div class="cover"><img src="${esc(g.cover)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()"><span>${esc(tit)}</span></div>` : cv(g);
+  return `<article class="tile">${capa}<div class="tt" title="${esc(tit)}">${esc(tit)}</div>
+    <div class="au">${esc(g.author)}${g.lang ? `<span class="tag">${esc(g.lang.toUpperCase())}</span>` : ''}${g.fonte ? `<span class="tag fonte">${esc(FONTE_NOME[g.fonte])}</span>` : ''}</div><div class="tact">${tileAct(g)}</div></article>`;
 };
 const _bookCard = bookCard;
 bookCard = function (b) {
@@ -2588,7 +2872,8 @@ function paraHtml(t, hs, used) {
 function pageBody() {
   if (!R) return '';
   const hs = hls().filter(h => h.page === R.idx), used = new Set();
-  return R.pages[R.idx].map(x => x.h ? `<h4>${esc(x.t)}</h4>` : `<p>${paraHtml(x.t, hs, used)}</p>`).join('');
+  const it = h => h.replace(/(^|[^\w])_([^_<>\n]{1,300}?)_(?=[^\w]|$)/g, '$1<em>$2</em>');
+  return R.pages[R.idx].map(x => x.h ? `<h4>${it(esc(x.t))}</h4>` : `<p>${it(paraHtml(x.t, hs, used))}</p>`).join('');
 }
 function repaintPage() { const a = $('#rbody article'); if (a) a.innerHTML = pageBody(); }
 function ctxFor(text, page) {
@@ -3652,7 +3937,9 @@ const _vSet7 = VIEWS.settings;
 VIEWS.settings = () => {
   const t = temaEscolhido(), n = notifCfg();
   const ap = `<section class="card"><h2>Aparência</h2><div class="rsel">${[['auto', '🌗 Automático'], ['claro', '☀️ Claro'], ['escuro', '🌙 Escuro']].map(([v, l]) => `<button class="chip ${t === v ? 'on' : ''}" data-g="tema" data-v="${v}">${l}</button>`).join('')}</div>
-    <p class="muted small" style="margin:.5rem 0 0">Automático segue o tema do celular ou do computador.</p></section>
+    <p class="muted small" style="margin:.5rem 0 0">Automático segue o tema do celular ou do computador.</p>
+    <label class="tgl" style="margin-top:.9rem"><input type="checkbox" data-g="orto" ${ortoLigada() ? 'checked' : ''}> Ortografia atual nos livros antigos</label>
+    <p class="muted small" style="margin:.3rem 0 0">Livros em português escritos antes de 1943 aparecem com a escrita de hoje (<i>elle</i> → ele, <i>pharmacia</i> → farmácia). Desligue para ler a grafia original.</p></section>
     <section class="card"><h2>💭 Reflexões</h2><p class="muted small" style="margin-top:0">Notificações com frases e perguntas que puxam o pensamento crítico, ${APP.plat === 'android' ? 'no celular' : 'no Windows'}, mesmo com o app fechado.</p>
       <label class="tgl"><input type="checkbox" id="notOn" ${n.on ? 'checked' : ''} data-g="notif"> Receber reflexões</label>
       <div class="row" style="margin-top:.4rem">${[0, 1, 2].map(i => `<label style="flex:1">${i + 1}º horário<input type="time" class="notH" value="${esc(n.horas[i] || '')}" ${n.on ? '' : 'disabled'}></label>`).join('')}</div>
@@ -3725,6 +4012,12 @@ document.addEventListener('click', e => {
   const a = el.dataset.g, id = el.dataset.id, v = el.dataset.v;
   switch (a) {
     case 'tema': state.settings.tema = v; Store.save(state); aplicaTema(); render(); break;
+    case 'orto': {
+      state.prefs = Object.assign({}, state.prefs || {}, { orto: !ortoLigada() }); Store.save(state);
+      toast(ortoLigada() ? 'Ortografia atual ligada.' : 'Mostrando a grafia original dos livros.');
+      if (typeof R !== 'undefined' && R) { const id = R.b.id; flushReading(false); openReader(id); } else render();
+      break;
+    }
     case 'irconq': view = 'stats'; render(); setTimeout(() => { const c = $('#conq'); if (c) c.scrollIntoView({ behavior: 'smooth' }); }, 50); break;
     case 'irrank': irSocial('rank'); break;
     case 'celok': fechaCel(); break;
@@ -3954,6 +4247,9 @@ setInterval(() => { if (typeof R !== 'undefined' && R) agendaJogo(); }, 60000);
 .pstats button{cursor:pointer}.pstats b{font-size:1.05rem;color:var(--ink)}
 .socin{padding:2rem 1.2rem}
 .tgl{display:flex;align-items:center;gap:.5rem;font-weight:600}
+.tag.fonte{background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent)}
+.fonteh{margin:1.4rem .2rem .5rem;font-size:1.05rem}
+.reader .btn.on{background:var(--accent);color:var(--accent-ink,#fff);border-color:var(--accent)}
 .atu-b{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:95;display:flex;align-items:center;gap:14px;width:max-content;max-width:min(720px,94vw);padding:14px 16px;border:1px solid var(--accent);border-radius:18px;background:var(--card);color:var(--ink);box-shadow:0 20px 50px -10px rgba(0,0,0,.45);animation:atuSobe .45s cubic-bezier(.2,1.2,.4,1)}
 .atu-ic{font-size:1.6rem}.atu-tx{flex:1;min-width:0}.atu-tx span{display:block;font-size:.85rem;color:var(--muted);margin-top:2px}
 .atu-bts{display:flex;gap:8px;flex:none}
