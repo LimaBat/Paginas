@@ -1625,7 +1625,19 @@ function autorDoCabecalho(wt) {
   wt = String(wt || '').slice(0, 6000);
   let m = wt.match(/\|\s*(?:autor|author|auteur|autore|autor_nome)\s*=\s*(?:\[\[\s*(?:Autor|Author|Auteur|Autore)\s*:\s*)?([^|\]\n}]+)/i)
     || wt.match(/\[\[\s*(?:Autor|Author|Auteur|Autore)\s*:\s*([^|\]]+)/i);
-  return m ? m[1].trim() : '';
+  if (m) return m[1].trim();
+  // páginas com digitalização (<pages index=...>) só trazem o autor numa categoria com o nome dele
+  return autorDaCategoria(wt);
+}
+function autorDaCategoria(wt) {
+  const gen = /^(obras|romances?|contos?|poesias?|poemas?|livros?|textos?|literatura|dom[ií]nio|p[aá]ginas|teatro|cr[oô]nicas?|ensaios?|works|novels?|poems?|plays?|texts?|books?|categoria|portal|pd|ps|\d)/i;
+  for (const c of String(wt).matchAll(/\[\[\s*(?:Categoria|Category|Catégorie|Categoría)\s*:\s*([^|\]]+)/gi)) {
+    const n = c[1].trim();
+    if (gen.test(n) || /\d/.test(n)) continue;
+    const w = n.split(/\s+/);
+    if (w.length >= 2 && w.length <= 6 && w.every(x => /^(\p{Lu}[\p{L}.'’-]*|de|da|do|dos|das|e|von|van|del|la|le|of)$/u.test(x))) return n;
+  }
+  return '';
 }
 async function buscaWikisource(q, langs) {
   const out = [];

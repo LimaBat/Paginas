@@ -14,7 +14,9 @@ try {
   const wt = pg && pg.revisions[0].slots.main['*'];
   const m = String(wt).slice(0, 6000).match(/\|\s*(?:autor|author)\s*=\s*(?:\[\[\s*(?:Autor|Author)\s*:\s*)?([^|\]\n}]+)/i) || String(wt).match(/\[\[\s*(?:Autor|Author)\s*:\s*([^|\]]+)/i);
   console.log('Wikisource autor:', m && m[1], '| início do cabeçalho:', String(wt).slice(0, 160).replace(/\n/g, ' '));
-  conf(m && /Alencar/.test(m[1]), 'Wikisource: autor no cabeçalho');
+  const cat = [...String(wt).matchAll(/\[\[\s*Categoria\s*:\s*([^|\]]+)/gi)].map(c => c[1].trim()).find(n => /Alencar/.test(n));
+  console.log('Wikisource autor pela categoria:', cat);
+  conf((m && /Alencar/.test(m[1])) || cat, 'Wikisource: autor no cabeçalho ou na categoria');
   const p = await json(`${base}?action=parse&format=json&prop=text&disableeditsection=1&redirects=1&page=Iracema`);
   const html = p.parse.text['*'];
   const links = [...html.matchAll(/href="([^"]+)"/g)].map(x => { try { return decodeURIComponent(x[1]); } catch (e) { return x[1]; } }).filter(h => h.startsWith('/wiki/Iracema/'));
