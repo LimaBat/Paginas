@@ -1330,7 +1330,7 @@ function renderSettings() {
     <h2>Metas e hábito</h2>
     <div class="setgrid">
       <label>Meta diária medida em<select data-set="goalType"><option value="minutes" ${s.goalType === 'minutes' ? 'selected' : ''}>Minutos</option><option value="pages" ${s.goalType === 'pages' ? 'selected' : ''}>Páginas</option></select></label>
-      <label>Meta diária (${unitLabel()})<input type="number" min="1" data-set="dailyGoal" value="${s.dailyGoal}"></label>
+      <label>Meta diária (${unitLabel()})<input type="number" min="1" data-set="dailyGoal" value="${s.dailyGoal}">${state.trilha && state.trilha.on && state.trilha.metaAuto ? '<small class="muted">🧭 Ajustada pela sua Trilha do Leitor. Se mudar aqui, ela passa a ser só sua.</small>' : ''}</label>
       <label>Meta anual (livros)<input type="number" min="0" data-set="yearGoal" value="${s.yearGoal}"></label>
       <label>Dias de descanso por semana<input type="number" min="0" max="3" data-set="restPerWeek" value="${s.restPerWeek}"></label>
       <label>Lembrete diário<input type="time" data-set="reminder" value="${esc(s.reminder)}"></label>
@@ -1486,6 +1486,10 @@ document.addEventListener('change', e => {
       if (k === 'restPerWeek') v = Math.min(3, v);
     }
     state.settings[k] = v;
+    if ((k === 'dailyGoal' || k === 'goalType') && state.trilha && state.trilha.metaAuto) {
+      state.trilha.metaAuto = false;
+      toast('Meta personalizada. Para a Trilha voltar a ajustar sua meta, toque em "Usar meta da trilha" na aba Trilha.');
+    }
     if (k === 'reminder' && v && 'Notification' in window && Notification.permission === 'default') Notification.requestPermission();
     commit();
   }
@@ -2200,7 +2204,7 @@ function renderOnb() {
   } else {
     h += `<h1>Últimos detalhes</h1><p class="muted">Em quais idiomas você lê?</p>
       <div class="gchips">${LANGS.map(l => `<button class="gchip ${onb.langs.includes(l.id) ? 'on' : ''}" data-x="onblang" data-id="${l.id}">${esc(l.label)}</button>`).join('')}</div>
-      <p class="muted" style="margin-top:1.4rem">Quanto tempo por dia você quer ler? Comece pequeno: o hábito vale mais que o volume.</p>
+      <p class="muted" style="margin-top:1.4rem">${onb.plano && onb.freq >= 0 && onb.conf >= 0 ? '🧭 Com a Trilha do Leitor, sua meta começa em <b>' + TR_DEGRAUS[nivelInicial(onb.freq, onb.conf)].min + ' minutos</b> e sobe sozinha, aos poucos, conforme você avança. Se preferir, escolha outra:' : 'Quanto tempo por dia você quer ler? Comece pequeno: o hábito vale mais que o volume.'}</p>
       <div class="gchips">${[5, 10, 15, 20, 30].map(m => `<button class="gchip ${onb.goal === m ? 'on' : ''}" data-x="onbgoal" data-id="${m}">${m} min</button>`).join('')}</div>
       <p class="muted" style="margin-top:1.4rem">Quer um lembrete para ler? Ele chega mesmo com o Páginas fechado e só aparece se você ainda não leu no dia.</p>
       <div class="gchips">${[['', 'Sem lembrete'], ['08:00', '08:00'], ['12:30', '12:30'], ['19:00', '19:00'], ['20:00', '20:00'], ['22:00', '22:00']].map(([v, t]) => `<button class="gchip ${onb.lemb === v ? 'on' : ''}" data-x="onblemb" data-id="${v}">${t}</button>`).join('')}</div>`;
@@ -2262,7 +2266,7 @@ document.addEventListener('click', e => {
       state.profile = null; commit(); break;
     case 'onbgenre': onb.genres = onb.genres.includes(id) ? onb.genres.filter(g => g !== id) : onb.genres.concat(id); redrawOnb(); break;
     case 'onblang': onb.langs = onb.langs.includes(id) ? onb.langs.filter(g => g !== id) : onb.langs.concat(id); redrawOnb(); break;
-    case 'onbgoal': onb.goal = Number(id); redrawOnb(); break;
+    case 'onbgoal': onb.goal = Number(id); onb.metaPropria = true; redrawOnb(); break;
     case 'onbback': onb.step = Math.max(0, onb.step - 1); redrawOnb(); break;
     case 'onbskip': onb.genres = []; finishOnb(); break;
     case 'onbhab': {
@@ -2874,6 +2878,8 @@ render();
 .trnums{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin:.4rem 0 .6rem}
 .trnums div{display:flex;flex-direction:column;padding:.55rem .7rem;border-radius:12px;background:color-mix(in srgb,var(--ink) 5%,transparent)}
 .trnums small{color:var(--muted);font-size:.74rem}
+.trmeta{margin-top:.8rem;padding:.7rem .8rem;border-radius:12px;background:color-mix(in srgb,var(--accent) 10%,transparent);display:flex;gap:.7rem;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.trmeta>div{display:flex;flex-direction:column;gap:.1rem}
 .trsug{margin-top:.8rem;padding:.7rem .8rem;border-radius:12px;background:color-mix(in srgb,var(--accent) 12%,transparent);display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
 .trprox{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.5rem}
 .trprox div{display:flex;flex-direction:column;padding:.6rem .8rem;border-radius:12px;border:1px dashed color-mix(in srgb,var(--ink) 25%,transparent);opacity:.75}
@@ -4456,6 +4462,8 @@ function trilhaDoOnb(o) {
   if (!t.nivel) t.nivel = nivelInicial(o.freq, o.conf);
   t.on = !!o.plano;
   if (t.on && !t.inicio) t.inicio = todayStr();
+  if (t.on && t.metaAuto === undefined) t.metaAuto = !o.metaPropria;
+  aplicaMetaTrilha();
   if (t.on) view = 'trilha';
   Store.save(state);
 }
@@ -4495,6 +4503,25 @@ function trFeito(b) {
   return false;
 }
 function trFeitosNoDegrau(n) { return trLivrosDoDegrau(n).filter(trFeito).length; }
+/* meta diária pela trilha: começa no mínimo do degrau e sobe aos poucos a cada livro terminado,
+   chegando perto da meta do próximo degrau quando a pessoa está pronta para subir */
+function metaTrilha(n, feitos) {
+  const t = TRL(); n = n || t.nivel || 1;
+  const D = TR_DEGRAUS[n];
+  const prox = n < 6 ? TR_DEGRAUS[n + 1].min : 40;
+  const meta = n < 6 ? Math.max(1, Math.min(D.meta, trLivrosDoDegrau(n).length)) : 4;
+  const f = Math.min(meta, feitos === undefined ? trFeitosNoDegrau(n) : feitos);
+  return Math.round(D.min + (prox - D.min) * f / (meta + 1));
+}
+function aplicaMetaTrilha() {
+  const t = TRL();
+  if (!t.on || !t.nivel || !t.metaAuto) return false;
+  const m = metaTrilha();
+  if (state.settings.goalType === 'minutes' && state.settings.dailyGoal === m) return false;
+  const antes = state.settings.goalType === 'minutes' ? state.settings.dailyGoal : 0;
+  state.settings.goalType = 'minutes'; state.settings.dailyGoal = m;
+  return antes ? m - antes : true;
+}
 // sobe de degrau quando terminar livros suficientes do degrau atual
 function trConfereSubida() {
   const t = TRL(); if (!t.on || !t.nivel) return;
@@ -4502,12 +4529,16 @@ function trConfereSubida() {
   while (t.nivel < 6 && trFeitosNoDegrau(t.nivel) >= TR_DEGRAUS[t.nivel].meta) {
     t.nivel++; subiu = true;
     const D = TR_DEGRAUS[t.nivel];
-    CEL.fila.push({ tipo: 'trilha', e: D.e, nome: 'Novo degrau: ' + D.n, desc: `Você agora é ${D.leitor}. Os próximos livros são um pouquinho mais ricos. Sua meta sugerida passa a ser ${D.min} minutos por dia.` });
+    CEL.fila.push({ tipo: 'trilha', e: D.e, nome: 'Novo degrau: ' + D.n, desc: `Você agora é ${D.leitor}. Os próximos livros são um pouquinho mais ricos${t.metaAuto ? `, e sua meta diária passa a ser ${metaTrilha(t.nivel, 0)} minutos` : ''}.` });
   }
+  const mudou = aplicaMetaTrilha();
   if (subiu) {
+    if (!t.metaAuto && state.settings.goalType === 'minutes' && state.settings.dailyGoal < TR_DEGRAUS[t.nivel].min) t.sugerirMeta = TR_DEGRAUS[t.nivel].min;
     Store.save(state);
-    if (state.settings.goalType === 'minutes' && state.settings.dailyGoal < TR_DEGRAUS[t.nivel].min) t.sugerirMeta = TR_DEGRAUS[t.nivel].min;
     celebra();
+  } else if (mudou) {
+    Store.save(state);
+    if (typeof mudou === 'number' && mudou > 0) toast(`📈 Sua meta diária subiu para ${state.settings.dailyGoal} minutos. Você está evoluindo!`);
   }
 }
 
@@ -4604,6 +4635,15 @@ function renderTrilha() {
       <div><b>${feitos} de ${meta}</b><small>${nv < 6 ? 'livros deste degrau para subir' : 'livros lidos no último degrau'}</small></div>
     </div>
     <div class="mbar"><i style="width:${Math.min(100, Math.round(feitos / Math.max(1, meta) * 100))}%"></i></div>
+    ${(() => {
+      const mt = metaTrilha(nv, feitos), mprox = feitos < meta ? metaTrilha(nv, feitos + 1) : (nv < 6 ? metaTrilha(nv + 1, 0) : mt);
+      if (t.metaAuto) return `<div class="trmeta"><div><small class="muted">Meta diária da trilha</small><b>${state.settings.dailyGoal} min por dia</b>
+        <small class="muted">${mprox > mt ? `Sobe para ${mprox} min quando você terminar o próximo livro.` : 'Você está no ritmo máximo da trilha. 💪'}</small></div>
+        <button class="btn sm" data-g="trmetaoff">Usar meta própria</button></div>`;
+      return `<div class="trmeta"><div><small class="muted">Meta diária</small><b>${state.settings.dailyGoal} ${unitLabel()} por dia (sua)</b>
+        <small class="muted">Pela trilha seria ${mt} min, subindo aos poucos a cada livro.</small></div>
+        <button class="btn sm primary" data-g="trmetaon">Usar meta da trilha</button></div>`;
+    })()}
     <p class="small" style="margin:.8rem 0 0">💡 ${dicas[nv]}</p>
     ${sug ? `<div class="trsug">Você subiu de degrau! Que tal aumentar a meta diária para <b>${t.sugerirMeta} minutos</b>? <button class="btn sm primary" data-g="trmeta">Aumentar</button><button class="btn sm" data-g="trmetanao">Agora não</button></div>` : ''}
     ${!t.on ? '<div class="trsug">A trilha está pausada. <button class="btn sm primary" data-g="trligar">Retomar trilha</button></div>' : ''}
@@ -4648,18 +4688,22 @@ document.addEventListener('click', e => {
       const r = t.resp || {};
       if (!(r.freq >= 0) || !(r.conf >= 0)) { toast('Responda as duas perguntas.'); break; }
       r.em = todayStr(); t.nivel = nivelInicial(r.freq, r.conf); t.on = true; t.inicio = t.inicio || todayStr();
+      if (t.metaAuto === undefined) t.metaAuto = true;
+      aplicaMetaTrilha();
       TRS.res = {}; Store.save(state); render(); window.scrollTo(0, 0);
-      toast(`Trilha pronta! Você começa como ${TR_DEGRAUS[t.nivel].leitor}.`);
+      toast(`Trilha pronta! Você começa como ${TR_DEGRAUS[t.nivel].leitor}, com meta de ${state.settings.dailyGoal} minutos por dia.`);
       break;
     }
     case 'trfeito': { t.feitos[id] = Date.now(); Store.save(state); render(); break; }
-    case 'trsobe': if (t.nivel < 6) { t.nivel++; TRS.res = {}; Store.save(state); render(); window.scrollTo(0, 0); } break;
-    case 'trdesce': if (t.nivel > 1) { t.nivel--; TRS.res = {}; Store.save(state); render(); window.scrollTo(0, 0); } break;
+    case 'trsobe': if (t.nivel < 6) { t.nivel++; TRS.res = {}; aplicaMetaTrilha(); Store.save(state); render(); window.scrollTo(0, 0); } break;
+    case 'trdesce': if (t.nivel > 1) { t.nivel--; TRS.res = {}; aplicaMetaTrilha(); Store.save(state); render(); window.scrollTo(0, 0); } break;
     case 'trrefaz': t.resp = null; t.nivel = 0; Store.save(state); render(); window.scrollTo(0, 0); break;
     case 'trpausa': t.on = false; Store.save(state); render(); break;
-    case 'trligar': t.on = true; Store.save(state); render(); break;
+    case 'trligar': t.on = true; aplicaMetaTrilha(); Store.save(state); render(); break;
     case 'trmeta': state.settings.dailyGoal = t.sugerirMeta; t.sugerirMeta = 0; commit(); toast('Meta atualizada.'); break;
     case 'trmetanao': t.sugerirMeta = 0; Store.save(state); render(); break;
+    case 'trmetaon': t.metaAuto = true; t.sugerirMeta = 0; aplicaMetaTrilha(); commit(); toast(`Meta da trilha ativada: ${state.settings.dailyGoal} minutos por dia.`); break;
+    case 'trmetaoff': t.metaAuto = false; commit(); toast('Pronto: a meta agora é sua. Mude quando quiser em Ajustes.'); break;
   }
 });
 // ao terminar um livro, confere se sobe de degrau
@@ -4699,6 +4743,10 @@ document.addEventListener('change', e => {
 });
 setTimeout(function inicioTr() {
   if (!window.__booted) return setTimeout(inicioTr, 300);
+  try {
+    const t = TRL();
+    if (t.on && t.nivel && t.metaAuto === undefined) { t.metaAuto = true; t.sugerirMeta = 0; if (aplicaMetaTrilha()) { Store.save(state); render(); } }
+  } catch (e) {}
   try { _map = null; state.lembInfo = infoLembrete(); if (IS_APP) diskSave(state); } catch (e) {}
   // quem já tinha lembrete antes desta versão passa a receber com o app fechado
   if ((state.settings.reminder || 'off') !== (state.settings.lembAplicado || 'off') || state.settings.reminder) aplicaLembrete(false);
