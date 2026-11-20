@@ -5057,7 +5057,7 @@ finishBook = function (bid) { const r = _finishBookTr.apply(this, arguments); se
   function esconde() {
     const r = rd(); if (!r || r.hidden) return;
     // não some com o mouse em cima de uma barra, com texto selecionado ou com algum menu aberto
-    if (r.querySelector('.rhead:hover, .rfoot:hover') || document.getElementById('rtool') || document.getElementById('av-f') ||
+    if (r.querySelector('.rhead:hover, .rfoot:hover') || document.getElementById('rtool') || document.getElementById('av-f') || document.getElementById('hpanel') ||
         r.querySelector('.rpop:not([hidden]), .rmenu:not([hidden]), [data-aberto]') || String(getSelection()).trim()) { tm = setTimeout(esconde, 1500); return; }
     r.classList.add('calmo');
   }
