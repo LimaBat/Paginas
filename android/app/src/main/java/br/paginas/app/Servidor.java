@@ -388,6 +388,16 @@ public class Servidor {
         if (cx.length() > 3000) cx = cx.substring(0, 3000);
         String sys = "Você é um assistente de leitura que ajuda leitores brasileiros a entender trechos de livros. Explique o significado da palavra, expressão ou frase selecionada em português do Brasil, de forma clara e curta (no máximo 120 palavras). Se for uma palavra ou expressão, dê o sentido no contexto e, se for arcaica ou rara, o equivalente atual. Se o trecho estiver em outro idioma, traduza e explique. Se for uma frase, diga o que ela quer dizer e, se ajudar, o recurso literário usado. Não use títulos nem listas longas; pode usar **negrito** para destacar o termo principal.";
         String usr = "Livro: " + bt + " (" + ba + ")\n\nParágrafo de contexto:\n" + cx + "\n\nTrecho selecionado:\n" + sel + "\n\nExplique o significado do trecho selecionado.";
+        int maxTok = 500;
+        if ("quiz".equals(txt(in.get("modo")))) {  // quiz da Trilha do Leitor: perguntas sobre os livros lidos
+            String[] pq = cx.split("\\|");
+            int nq = 6;
+            try { nq = Math.min(10, Integer.parseInt(pq[0].trim())); } catch (Exception e) { }
+            String tq = pq.length > 1 ? pq[1] : "1", cod = pq.length > 2 ? pq[2] : "";
+            sys = "Você cria quizzes de leitura para quem está criando o hábito de ler. Responda SOMENTE com JSON válido, sem nenhum texto antes ou depois, no formato {\"q\":[{\"l\":\"título do livro\",\"p\":\"pergunta\",\"o\":[\"alternativa 1\",\"alternativa 2\",\"alternativa 3\",\"alternativa 4\",\"alternativa 5\"],\"c\":0}]}. Faça perguntas SIMPLES e objetivas sobre o enredo, os personagens principais, o desfecho e a ideia central de cada livro da lista: coisas que qualquer pessoa que leu o livro com atenção sabe responder. Não pergunte datas, números de capítulos, nomes de personagens secundários nem detalhes minúsculos. Só pergunte o que você tem certeza de que acontece no livro. Cada pergunta tem exatamente 5 alternativas curtas (até 12 palavras), diferentes entre si e plausíveis, com uma única correta; \"c\" é a posição (0 a 4) da correta. Distribua as perguntas entre todos os livros. Escreva em português do Brasil.";
+            usr = "Livros que a pessoa leu:\n" + sel + "\n\nCrie exatamente " + nq + " perguntas no total. Esta é a tentativa " + tq + " (código " + cod + "): faça perguntas diferentes das que faria numa tentativa anterior.";
+            maxTok = 2000;
+        }
         if (key.isEmpty()) {  // IA do Páginas: o mesmo intermediário (Cloudflare) do Investe.AI; as chaves ficam só lá
             String cp = "{\"sistema\":" + Json.str(sys) + ",\"mensagens\":[{\"role\":\"user\",\"content\":" + Json.str(usr) + "}]}";
             Map<String, String> cab = new HashMap<>();
@@ -407,7 +417,7 @@ public class Servidor {
             enviarJson(out, 200, "{\"text\":" + Json.str(txt(m.get("texto"))) + "}");
             return;
         }
-        String corpo = "{\"model\":" + Json.str(MODELO_IA) + ",\"max_tokens\":500,\"system\":" + Json.str(sys)
+        String corpo = "{\"model\":" + Json.str(MODELO_IA) + ",\"max_tokens\":" + maxTok + ",\"system\":" + Json.str(sys)
                 + ",\"messages\":[{\"role\":\"user\",\"content\":" + Json.str(usr) + "}]}";
 
         HttpURLConnection c = (HttpURLConnection) new URL("https://api.anthropic.com/v1/messages").openConnection();

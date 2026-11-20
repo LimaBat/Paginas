@@ -678,6 +678,16 @@ try {
       $ba = [string]$in.author
       $sys = 'Você é um assistente de leitura que ajuda leitores brasileiros a entender trechos de livros. Explique o significado da palavra, expressão ou frase selecionada em português do Brasil, de forma clara e curta (no máximo 120 palavras). Se for uma palavra ou expressão, dê o sentido no contexto e, se for arcaica ou rara, o equivalente atual. Se o trecho estiver em outro idioma, traduza e explique. Se for uma frase, diga o que ela quer dizer e, se ajudar, o recurso literário usado. Não use títulos nem listas longas; pode usar **negrito** para destacar o termo principal.'
       $usr = 'Livro: ' + $bt + ' (' + $ba + ")`n`nParágrafo de contexto:`n" + $cx + "`n`nTrecho selecionado:`n" + $sel + "`n`nExplique o significado do trecho selecionado."
+      $maxTok = 500
+      if ([string]$in.modo -eq 'quiz') {
+        # quiz da Trilha do Leitor: perguntas de multipla escolha sobre os livros lidos
+        $pq = ([string]$cx).Split('|')
+        $nq = 6; if ($pq.Length -gt 0 -and $pq[0] -match '^\d+$') { $nq = [Math]::Min(10, [int]$pq[0]) }
+        $tq = '1'; if ($pq.Length -gt 1) { $tq = $pq[1] }
+        $sys = 'Você cria quizzes de leitura para quem está criando o hábito de ler. Responda SOMENTE com JSON válido, sem nenhum texto antes ou depois, no formato {"q":[{"l":"título do livro","p":"pergunta","o":["alternativa 1","alternativa 2","alternativa 3","alternativa 4","alternativa 5"],"c":0}]}. Faça perguntas SIMPLES e objetivas sobre o enredo, os personagens principais, o desfecho e a ideia central de cada livro da lista: coisas que qualquer pessoa que leu o livro com atenção sabe responder. Não pergunte datas, números de capítulos, nomes de personagens secundários nem detalhes minúsculos. Só pergunte o que você tem certeza de que acontece no livro. Cada pergunta tem exatamente 5 alternativas curtas (até 12 palavras), diferentes entre si e plausíveis, com uma única correta; "c" é a posição (0 a 4) da correta. Distribua as perguntas entre todos os livros. Escreva em português do Brasil.'
+        $usr = "Livros que a pessoa leu:`n" + $sel + "`n`nCrie exatamente " + $nq + " perguntas no total. Esta é a tentativa " + $tq + " (código " + $(if ($pq.Length -gt 2) { $pq[2] } else { '' }) + "): faça perguntas diferentes das que faria numa tentativa anterior."
+        $maxTok = 2000
+      }
       if (-not $cfg.apiKey) {
         # IA do Paginas: o mesmo intermediario (Cloudflare) do Investe.AI; as chaves ficam so la
         $r = Invoke-Http 'POST' ($IA_PROXY_URL + '/chat') 'application/json' (Json-Bytes @{ sistema = $sys; mensagens = @(@{ role = 'user'; content = $usr }) }) @{ 'X-App-Token' = $IA_PROXY_TOKEN; 'X-App-Versao' = ('paginas-' + $APP_VERSAO) }
@@ -692,7 +702,7 @@ try {
         Send-Json $ctx 200 (ConvertTo-Json -Compress -InputObject @{ text = [string]$j.texto })
         return
       }
-      $payload =ConvertTo-Json -Compress -Depth 6 -InputObject @{ model = 'claude-haiku-5-5'; max_tokens = 500; system = $sys; messages = @(@{ role = 'user'; content = $usr }) }
+      $payload =ConvertTo-Json -Compress -Depth 6 -InputObject @{ model = 'claude-haiku-5-5'; max_tokens = $maxTok; system = $sys; messages = @(@{ role = 'user'; content = $usr }) }
       $rq = [Net.HttpWebRequest]::Create('https://api.anthropic.com/v1/messages')
       $rq.Method = 'POST'
       $rq.ContentType = 'application/json'
@@ -1133,9 +1143,9 @@ function finishBook(id) {
   b.status = 'finished'; b.currentPage = b.totalPages; b.finishedAt = b.finishedAt || todayStr();
   commit(); openFinish(id);
 }
-function deleteBook(id) {
+async function deleteBook(id) {
   const b = state.books.find(x => x.id === id); if (!b) return;
-  if (!confirm(`Excluir "${b.title}" e o histórico de leitura dele?`)) return;
+  if (!await confirma(`Excluir “${b.title}”?`, 'O livro sai da sua estante junto com o histórico de leitura dele.', { ic: '🗑️', ok: 'Excluir', perigo: true })) return;
   state.logs.filter(l => l.bookId === id).forEach(l => apagado(l.id));
   state.books = state.books.filter(x => x.id !== id);
   state.logs = state.logs.filter(l => l.bookId !== id);
@@ -1414,11 +1424,11 @@ function exportData() {
 }
 function importData(file) {
   const r = new FileReader();
-  r.onload = () => {
+  r.onload = async () => {
     try {
       const p = JSON.parse(r.result);
       if (!p || !Array.isArray(p.books) || !Array.isArray(p.logs)) throw new Error('formato');
-      if (!confirm('Isso vai substituir os dados atuais pelos do backup. Continuar?')) return;
+      if (!await confirma('Importar este backup?', 'Os dados atuais deste aparelho serão substituídos pelos do arquivo.', { ic: '📥', ok: 'Importar' })) return;
       const d = defaults();
       state = { ...d, ...p, settings: { ...d.settings, ...(p.settings || {}) }, rests: Array.isArray(p.rests) ? p.rests : [] };
       commit(); toast('Backup importado.');
@@ -1433,6 +1443,54 @@ function toast(msg) {
   const el = $('#toast'); el.textContent = msg; el.classList.add('show');
   clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('show'), 3200);
 }
+
+/* ---------- avisos com o tema do app (no lugar das caixas cinzas do navegador) ---------- */
+const AV = { fila: [], aberto: null };
+// o: { ic, t, x, ok, nao (null = sem botão de cancelar), perigo, campos: [{ nome, rot, valor, max, area }], acao }
+function aviso(o) {
+  return new Promise(res => { AV.fila.push({ o, res }); avProximo(); });
+}
+function avProximo() {
+  if (AV.aberto || !AV.fila.length) return;
+  if (document.getElementById('cel')) { setTimeout(avProximo, 400); return; }   // espera a comemoração fechar
+  const { o, res } = AV.fila.shift();
+  AV.aberto = { o, res };
+  const nao = o.nao === undefined ? 'Cancelar' : o.nao;
+  const campos = (o.campos || []).map((c, i) => `<label class="av-c">${esc(c.rot || '')}${c.area
+    ? `<textarea data-avc="${i}" maxlength="${c.max || 300}" rows="3">${esc(c.valor || '')}</textarea>`
+    : `<input data-avc="${i}" maxlength="${c.max || 120}" value="${esc(c.valor || '')}">`}</label>`).join('');
+  document.body.insertAdjacentHTML('beforeend', `<div id="av-f" class="av-f"><div class="av-b" role="dialog" aria-modal="true">
+    <div class="av-top"><div class="av-ic">${o.ic || '📖'}</div><div class="av-tx"><b>${esc(o.t || '')}</b>${o.x ? `<span>${esc(o.x)}</span>` : ''}</div></div>
+    ${campos ? `<div class="av-cs">${campos}</div>` : ''}
+    <div class="av-bts"><button class="btn ${o.perigo ? 'perigo' : 'primary'}" data-av="ok">${esc(o.ok || 'OK')}</button>${nao ? `<button class="btn" data-av="nao">${esc(nao)}</button>` : ''}</div></div></div>`);
+  const f = document.getElementById('av-f');
+  const c0 = f.querySelector('[data-avc]');
+  setTimeout(() => (c0 || f.querySelector('[data-av=ok]')).focus(), 60);
+  f.addEventListener('click', e => {
+    if (e.target === f) return avFecha(false);
+    const b = e.target.closest('[data-av]'); if (b) avFecha(b.dataset.av === 'ok');
+  });
+  f.addEventListener('keydown', e => {
+    if (e.key === 'Escape') avFecha(false);
+    if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') { e.preventDefault(); avFecha(true); }
+  });
+}
+function avFecha(ok) {
+  const a = AV.aberto; if (!a) return;
+  const f = document.getElementById('av-f');
+  let r = ok;
+  if (a.o.campos) r = ok ? a.o.campos.map((c, i) => f.querySelector(`[data-avc="${i}"]`).value) : null;
+  f.classList.add('saindo');
+  setTimeout(() => { f.remove(); AV.aberto = null; a.res(r); if (ok && a.o.acao) a.o.acao(); avProximo(); }, 160);
+}
+const confirma = (t, x, op) => aviso(Object.assign({ ic: '❓', t, x, ok: 'Sim', nao: 'Cancelar' }, op || {}));
+// botão "voltar" do Android: fecha o aviso ou a comemoração antes de sair da tela
+window.paginasVoltar = function () {
+  if (AV.aberto) { avFecha(false); return true; }
+  const qz = document.querySelector('#qz [data-q=fecha]'); if (qz) { qz.click(); return true; }
+  const c = document.getElementById('cel'); if (c) { c.querySelector('button') ? c.querySelector('button').click() : c.remove(); return true; }
+  return false;
+};
 
 /* ============ Eventos ============ */
 document.addEventListener('click', e => {
@@ -1466,9 +1524,9 @@ document.addEventListener('click', e => {
     }
     case 'export': exportData(); break;
     case 'wipe':
-      if (confirm('Apagar todos os livros, registros e configurações? Isso não pode ser desfeito.')) {
-        state = defaults(); draft = { bookId: '', pages: '', minutes: '' }; commit(); toast('Dados apagados.');
-      }
+      confirma('Apagar todos os seus dados?', 'Todos os livros, registros e configurações deste aparelho serão apagados. Isso não pode ser desfeito.', { ic: '⚠️', ok: 'Apagar tudo', perigo: true }).then(ok => {
+        if (ok) { state = defaults(); draft = { bookId: '', pages: '', minutes: '' }; commit(); toast('Dados apagados.'); }
+      });
       break;
   }
 });
@@ -1534,13 +1592,38 @@ async function api(path, opts) {
 
 /* ---------- salvamento em disco ---------- */
 function diskSave(s) { if (loadFailed) return; pendingSave = s; clearTimeout(saveT); saveT = setTimeout(flushSave, 400); }
-function flushSave() {
+/* Salva no disco. Se falhar (no celular o Android pausa o app em segundo plano), NÃO perde os dados:
+   guarda de novo para tentar outra vez em silêncio, e só avisa se continuar falhando. */
+let saveFalhas = 0, saveVoando = null;
+function flushSave(op) {
+  op = op || {};
   clearTimeout(saveT);
-  if (!pendingSave || !IS_APP) return Promise.resolve();
-  const body = JSON.stringify(pendingSave); pendingSave = null;
-  return api('/api/save', { method: 'POST', body, keepalive: body.length < 60000 })
-    .catch(e => toast('Não consegui salvar no disco: ' + e.message));
+  if (!IS_APP) return Promise.resolve(true);
+  if (!pendingSave) return saveVoando || Promise.resolve(true);
+  // um de cada vez: se outro salvamento está a caminho, espera ele (senão o antigo poderia chegar depois e apagar o novo)
+  if (saveVoando) return saveVoando.catch(() => {}).then(() => flushSave(op));
+  const s = pendingSave; pendingSave = null;
+  const body = JSON.stringify(s);
+  // keepalive só ao sair: o navegador limita a 64 KB somando os pedidos em andamento, e passar disso dá erro
+  const p = api('/api/save', { method: 'POST', body, keepalive: !!op.saindo && body.length < 60000 })
+    .then(() => { saveFalhas = 0; return true; })
+    .catch(e => {
+      if (!pendingSave) pendingSave = s;
+      saveFalhas++;
+      if (document.visibilityState === 'visible') {
+        if (saveFalhas <= 4) saveT = setTimeout(flushSave, 1200 * saveFalhas);
+        else aviso({ ic: '💾', t: 'Não estou conseguindo salvar', x: 'Suas leituras continuam guardadas aqui na tela, mas não consegui gravar no aparelho (' + e.message + '). Vou tentar de novo sozinho; se continuar, feche e abra o Páginas.', ok: 'Tentar agora', acao: () => { saveFalhas = 0; flushSave(); } });
+      }
+      if (op.lancar) throw e;
+      return false;
+    })
+    .finally(() => { if (saveVoando === p) saveVoando = null; });
+  saveVoando = p;
+  return p;
 }
+// voltou para a tela: termina o que ficou sem salvar enquanto o app estava pausado
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && pendingSave) { saveFalhas = 0; setTimeout(flushSave, 600); } });
+window.paginasSalvar = () => { try { flushSave({ saindo: true }); } catch (e) {} };
 const _origSave = Store.save;
 Store.save = function (s) {
   const quiet = !!(window.Sync && Sync.quiet);
@@ -2319,8 +2402,8 @@ document.addEventListener('keydown', e => {
 function startPing() {
   const ping = () => api('/api/ping').catch(() => {});
   ping(); setInterval(ping, 5000);
-  addEventListener('pagehide', () => { flushReading(true); flushSave(); try { navigator.sendBeacon('/api/bye?t=' + API.token); } catch (e) {} });
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { flushReading(false); flushSave(); } });
+  addEventListener('pagehide', () => { flushReading(true); flushSave({ saindo: true }); try { navigator.sendBeacon('/api/bye?t=' + API.token); } catch (e) {} });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { flushReading(false); flushSave({ saindo: true }); } });
 }
 async function boot() {
   if (IS_APP) {
@@ -2878,6 +2961,36 @@ render();
 .trnums{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin:.4rem 0 .6rem}
 .trnums div{display:flex;flex-direction:column;padding:.55rem .7rem;border-radius:12px;background:color-mix(in srgb,var(--ink) 5%,transparent)}
 .trnums small{color:var(--muted);font-size:.74rem}
+.trquiz{display:flex;gap:.9rem;align-items:flex-start;margin-top:1rem}
+.trquiz.pronto{border:1px solid var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--card))}
+.qz-b{width:min(520px,100%);max-height:calc(100vh - 32px);overflow:auto}
+.qz-b h2{margin:.3rem 0 .4rem;font-size:1.3rem}
+.qz-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem}
+.qz-tag{font-size:.75rem;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);font-weight:700}
+.qz-x{background:none;border:0;color:var(--muted);font-size:1.1rem;cursor:pointer;padding:.3rem .5rem}
+.qz-ic{font-size:2.6rem;text-align:center;margin:.2rem 0}
+.qz-b>h2,.qz-b>.qz-ic{text-align:center}
+.qz-livros{margin:.4rem 0 .8rem;padding-left:1.1rem}.qz-livros li{margin:.2rem 0}
+.qz-regras{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;margin:.6rem 0}
+.qz-regras div{display:flex;flex-direction:column;align-items:center;text-align:center;padding:.55rem .3rem;border-radius:12px;background:color-mix(in srgb,var(--ink) 5%,transparent)}
+.qz-regras b{font-size:1.1rem;color:var(--accent)}.qz-regras small{font-size:.72rem;color:var(--muted)}
+.qz-p{font-size:1.12rem;line-height:1.4;margin:.3rem 0 1rem}
+.qz-ops{display:flex;flex-direction:column;gap:.5rem}
+.qz-op{display:flex;gap:.7rem;align-items:center;text-align:left;font:inherit;font-size:.98rem;color:var(--ink);background:color-mix(in srgb,var(--ink) 4%,transparent);border:1px solid color-mix(in srgb,var(--ink) 15%,transparent);border-radius:14px;padding:.75rem .85rem;cursor:pointer;transition:transform .12s,background .15s,border-color .15s}
+.qz-op span{flex:none;width:1.8rem;height:1.8rem;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:.85rem;background:color-mix(in srgb,var(--accent) 15%,transparent);color:var(--accent)}
+.qz-op:hover:not(:disabled){border-color:var(--accent);transform:translateY(-1px)}
+.qz-op.certa{background:color-mix(in srgb,#3f8f55 22%,transparent);border-color:#3f8f55}.qz-op.certa span{background:#3f8f55;color:#fff}
+.qz-op.errada{background:color-mix(in srgb,#c0392b 18%,transparent);border-color:#c0392b}.qz-op.errada span{background:#c0392b;color:#fff}
+.qz-op:disabled{cursor:default}
+.qz-placar{display:flex;flex-direction:column;align-items:center;margin:.6rem 0;padding:.8rem;border-radius:14px;background:color-mix(in srgb,#c0392b 10%,transparent)}
+.qz-placar.ok{background:color-mix(in srgb,#3f8f55 15%,transparent)}
+.qz-placar b{font-size:1.6rem}.qz-placar span{color:var(--muted);font-size:.85rem}
+.qz-rev{margin:.6rem 0;font-size:.9rem}.qz-rev summary{cursor:pointer;color:var(--accent);font-weight:600}.qz-rev p{margin:.6rem 0}
+.qz-carrega{display:flex;flex-direction:column;align-items:center;gap:.6rem;padding:2rem 0;text-align:center}
+.qz-spin{width:42px;height:42px;border-radius:50%;border:4px solid color-mix(in srgb,var(--accent) 25%,transparent);border-top-color:var(--accent);animation:qzGira .8s linear infinite}
+@keyframes qzGira{to{transform:rotate(360deg)}}
+.btn.ghost{background:none;border-color:transparent;color:var(--muted)}
+@media(max-width:560px){.qz-f{place-items:end center}.qz-b{border-radius:20px 20px 14px 14px}}
 .trmeta{margin-top:.8rem;padding:.7rem .8rem;border-radius:12px;background:color-mix(in srgb,var(--accent) 10%,transparent);display:flex;gap:.7rem;align-items:center;justify-content:space-between;flex-wrap:wrap}
 .trmeta>div{display:flex;flex-direction:column;gap:.1rem}
 .trsug{margin-top:.8rem;padding:.7rem .8rem;border-radius:12px;background:color-mix(in srgb,var(--accent) 12%,transparent);display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
@@ -3266,7 +3379,9 @@ window.Sync = {
         if (marca(m) !== marca(state)) adotar(m);
       }
       quietSave();
-      await flushSave();
+      // se não conseguir salvar no disco, não envia: senão a conta receberia o arquivo antigo
+      if (saveVoando) await saveVoando.catch(() => {});
+      await flushSave({ lancar: true });
       await api('/api/google/push', { method: 'POST' });
       GS.last = Date.now(); GS.err = '';
       return true;
@@ -3326,7 +3441,7 @@ window.googleVoltou = async function (qs) {  // Android: o navegador devolve o l
   if (GS.connected) gConectado();
 };
 async function googleLogout() {
-  if (!confirm('Desconectar a conta Google deste aparelho? Seus dados continuam aqui e também na conta.')) return;
+  if (!await confirma('Desconectar a conta Google?', 'Seus dados continuam neste aparelho e também na conta. Só para de sincronizar.', { ic: '🔌', ok: 'Desconectar' })) return;
   try { Object.assign(GS, await (await api('/api/google/logout')).json()); } catch (e) { toast(e.message); }
   render();
 }
@@ -4173,7 +4288,7 @@ document.addEventListener('submit', e => {
   const f = e.target;
   if (f.id === 'finForm' && SOC.token) {
     const b = state.books.find(x => x.id === fin.id), note = (f.note && f.note.value || '').trim(), nota = fin.rating;
-    if (b) setTimeout(() => { if (confirm('Livro concluído! 🎉 Quer compartilhar ' + (note ? 'sua resenha' : 'que terminou') + ' com a Comunidade?')) abrirComposer({ tipo: 'resenha', texto: note || ('Terminei de ler “' + b.title + '”!'), nota, livro: b.title, livro_autor: b.author || '', gid: b.gid || '' }); }, 400);
+    if (b) setTimeout(async () => { if (await confirma('Livro concluído!', 'Quer compartilhar ' + (note ? 'sua resenha' : 'que terminou “' + b.title + '”') + ' com a Comunidade?', { ic: '🎉', ok: 'Compartilhar', nao: 'Agora não' })) abrirComposer({ tipo: 'resenha', texto: note || ('Terminei de ler “' + b.title + '”!'), nota, livro: b.title, livro_autor: b.author || '', gid: b.gid || '' }); }, 400);
   }
   if (f.id === 'compForm') { e.preventDefault(); publicar(); }
   if (f.classList.contains('cmf')) {
@@ -4243,10 +4358,10 @@ document.addEventListener('click', e => {
     }
     case 'reflshare': { const r = reflexaoDoDia(); abrirComposer({ tipo: 'frase', texto: r.t + (r.a ? ' — ' + r.a : '') }); break; }
     case 'socentrar': socEntrar(false); break;
-    case 'socsair': if (confirm('Sair da Comunidade neste aparelho?')) { socApi('/sair', { method: 'POST' }).catch(() => {}); SOC.token = ''; SOC.eu = null; SOC.tentou = true; socGuarda(); render(); } break;
+    case 'socsair': confirma('Sair da Comunidade?', 'Você sai só neste aparelho. Sua conta, posts e amigos continuam.', { ic: '👋', ok: 'Sair' }).then(ok => { if (ok) { socApi('/sair', { method: 'POST' }).catch(() => {}); SOC.token = ''; SOC.eu = null; SOC.tentou = true; socGuarda(); render(); } }); break;
     case 'apagaconta':
-      if (confirm('Apagar sua conta da Comunidade? Seus posts, comentários, seguidores e posição nos rankings serão apagados para sempre. Seus livros e progresso neste aparelho continuam.'))
-        carrega(async () => { await socApi('/eu', { method: 'DELETE' }); SOC.token = ''; SOC.eu = null; SOC.tentou = true; socGuarda(); toast('Conta da Comunidade apagada.'); });
+      confirma('Apagar sua conta da Comunidade?', 'Seus posts, comentários, seguidores e posição nos rankings serão apagados para sempre. Seus livros e progresso neste aparelho continuam.', { ic: '⚠️', ok: 'Apagar conta', perigo: true }).then(ok => ok &&
+        carrega(async () => { await socApi('/eu', { method: 'DELETE' }); SOC.token = ''; SOC.eu = null; SOC.tentou = true; socGuarda(); toast('Conta da Comunidade apagada.'); }));
       break;
     case 'saba': SOC.aba = v; if (v === 'eu') SOC.perfil = null; if (v === 'feed') SOC.feed = SOC.feed; render(); window.scrollTo(0, 0); break;
     case 'compor': abrirComposer(); break;
@@ -4266,11 +4381,11 @@ document.addEventListener('click', e => {
       SOC.coment[id] = {}; repintaPost(id);
       socApi('/posts/' + id + '/comentarios').then(j => { SOC.coment[id] = { lista: j.comentarios }; repintaPost(id); }).catch(err => toast(err.message));
       break;
-    case 'cmdel': if (confirm('Apagar este comentário?')) carrega(async () => { await socApi('/comentarios/' + id, { method: 'DELETE' }); const p = achaPost(el.dataset.p); if (p) p.comentarios--; SOC.coment[el.dataset.p] = { lista: (await socApi('/posts/' + el.dataset.p + '/comentarios')).comentarios }; repintaPost(el.dataset.p); }); break;
+    case 'cmdel': confirma('Apagar este comentário?', '', { ic: '🗑️', ok: 'Apagar', perigo: true }).then(ok => ok && carrega(async () => { await socApi('/comentarios/' + id, { method: 'DELETE' }); const p = achaPost(el.dataset.p); if (p) p.comentarios--; SOC.coment[el.dataset.p] = { lista: (await socApi('/posts/' + el.dataset.p + '/comentarios')).comentarios }; repintaPost(el.dataset.p); })); break;
     case 'postmenu': {
       const p = achaPost(id); if (!p) break;
-      if (p.meu) { if (confirm('Apagar esta publicação?')) carrega(async () => { await socApi('/posts/' + id, { method: 'DELETE' }); for (const l of [SOC.feed, SOC.comu && SOC.comu.posts, SOC.perfil && SOC.perfil.posts]) if (l) { const i = l.findIndex(x => x.id === id); if (i >= 0) l.splice(i, 1); } toast('Publicação apagada.'); }); }
-      else if (confirm('Denunciar esta publicação como ofensiva, spam ou imprópria?\n\nCom algumas denúncias ela some para todos.')) carrega(async () => { await socApi('/denunciar', { method: 'POST', body: { alvo: id } }); toast('Obrigado. A denúncia foi registrada.'); });
+      if (p.meu) { confirma('Apagar esta publicação?', 'Ela some do seu perfil e do feed de todo mundo.', { ic: '🗑️', ok: 'Apagar', perigo: true }).then(ok => ok && carrega(async () => { await socApi('/posts/' + id, { method: 'DELETE' }); for (const l of [SOC.feed, SOC.comu && SOC.comu.posts, SOC.perfil && SOC.perfil.posts]) if (l) { const i = l.findIndex(x => x.id === id); if (i >= 0) l.splice(i, 1); } toast('Publicação apagada.'); })); }
+      else confirma('Denunciar esta publicação?', 'Use se ela for ofensiva, spam ou imprópria. Com algumas denúncias ela some para todos.', { ic: '🚩', ok: 'Denunciar', perigo: true }).then(ok => ok && carrega(async () => { await socApi('/denunciar', { method: 'POST', body: { alvo: id } }); toast('Obrigado. A denúncia foi registrada.'); }));
       break;
     }
     case 'perfil': SOC.perfilId = id; SOC.aba = id === (SOC.eu && SOC.eu.id) ? 'eu' : 'perfil'; SOC.perfil = null; irSocial(); break;
@@ -4296,15 +4411,17 @@ document.addEventListener('click', e => {
     }
     case 'bloquear': {
       const bl = v === '1';
-      if (!bl && !confirm('Bloquear esta pessoa? Vocês deixam de se seguir e você não verá mais as publicações dela.')) break;
-      carrega(async () => { await socApi('/bloquear/' + id, { method: bl ? 'DELETE' : 'POST' }); SOC.perfil = null; SOC.feed = null; toast(bl ? 'Desbloqueado.' : 'Bloqueado.'); });
+      (bl ? Promise.resolve(true) : confirma('Bloquear esta pessoa?', 'Vocês deixam de se seguir e você não verá mais as publicações dela.', { ic: '🚫', ok: 'Bloquear', perigo: true })).then(ok => ok &&
+        carrega(async () => { await socApi('/bloquear/' + id, { method: bl ? 'DELETE' : 'POST' }); SOC.perfil = null; SOC.feed = null; toast(bl ? 'Desbloqueado.' : 'Bloqueado.'); }));
       break;
     }
     case 'editbio': {
       const u = SOC.perfil.usuario;
-      const nome = prompt('Seu nome na Comunidade:', u.nome); if (nome == null) break;
-      const bio = prompt('Uma frase sobre você como leitor(a):', u.bio || ''); if (bio == null) break;
-      carrega(async () => { await socApi('/perfil', { method: 'POST', body: { nome, bio } }); SOC.perfil = null; SOC.eu = Object.assign(SOC.eu || {}, { nome }); socGuarda(); });
+      aviso({ ic: '✏️', t: 'Editar perfil', ok: 'Salvar', nao: 'Cancelar', campos: [{ rot: 'Seu nome na Comunidade', valor: u.nome, max: 40 }, { rot: 'Uma frase sobre você como leitor(a)', valor: u.bio || '', max: 160, area: true }] }).then(r => {
+        if (!r) return;
+        const [nome, bio] = r;
+        carrega(async () => { await socApi('/perfil', { method: 'POST', body: { nome, bio } }); SOC.perfil = null; SOC.eu = Object.assign(SOC.eu || {}, { nome }); socGuarda(); });
+      });
       break;
     }
     case 'comu': carrega(() => abreComu(id)); view = 'social'; break;
@@ -4367,7 +4484,7 @@ const TR_DEGRAUS = [
   { e: '🌳', n: 'Romances acessíveis', leitor: 'Leitor constante', d: 'Seus primeiros romances inteiros, com enredo envolvente e linguagem ainda tranquila.', meta: 2, min: 15 },
   { e: '📚', n: 'Clássicos', leitor: 'Leitor de clássicos', d: 'Os grandes clássicos. Frases mais longas e palavras de outra época: use o ✨ Significado sem medo.', meta: 2, min: 20 },
   { e: '🦉', n: 'Clássicos densos', leitor: 'Leitor experiente', d: 'Narradores irônicos, ideias mais profundas e um vocabulário rico. Leitura para saborear devagar.', meta: 2, min: 25 },
-  { e: '🏛️', n: 'Grandes desafios', leitor: 'Leitor mestre', d: 'Obras monumentais, de linguagem difícil e muitas páginas. Quem chega aqui lê qualquer coisa.', meta: 99, min: 30 }
+  { e: '🏛️', n: 'Grandes desafios', leitor: 'Leitor mestre', d: 'Obras monumentais, de linguagem difícil e muitas páginas. Quem chega aqui lê qualquer coisa.', meta: 2, min: 30 }
 ];
 const TR_PT = [
   // degrau 1: curtos e simples
@@ -4502,45 +4619,202 @@ function trFeito(b) {
   if (achou) { t.feitos[b.id] = Date.now(); return true; }
   return false;
 }
-function trFeitosNoDegrau(n) { return trLivrosDoDegrau(n).filter(trFeito).length; }
+/* os livros que a pessoa precisa ler neste degrau: escolhidos pelos gostos e guardados (não mudam a cada abertura) */
+function trPlano(n) {
+  const t = TRL(); t.plano = t.plano || {};
+  const todos = trLivrosDoDegrau(n);
+  let ids = (t.plano[n] || []).filter(id => TR_POR_ID[id] && todos.includes(TR_POR_ID[id]));
+  if (!ids.length) { ids = todos.slice(0, Math.min(TR_DEGRAUS[n].meta, todos.length)).map(b => b.id); t.plano[n] = ids; }
+  return ids.map(id => TR_POR_ID[id]);
+}
+// livros do mesmo degrau que ainda não entraram em nenhum plano (para quando a pessoa não passar no quiz)
+function trNovosLivros(n) {
+  const t = TRL(); t.usados = t.usados || {};
+  const atual = trPlano(n).map(b => b.id);
+  const usados = new Set((t.usados[n] || []).concat(atual));
+  const todos = trLivrosDoDegrau(n);
+  let novos = todos.filter(b => !usados.has(b.id) && !trFeito(b));
+  if (novos.length < TR_DEGRAUS[n].meta) novos = novos.concat(todos.filter(b => !atual.includes(b.id) && !novos.includes(b) && !trFeito(b)));
+  if (novos.length < TR_DEGRAUS[n].meta) novos = novos.concat(todos.filter(b => !atual.includes(b.id) && !novos.includes(b)));
+  novos = novos.slice(0, Math.max(1, TR_DEGRAUS[n].meta));
+  t.usados[n] = Array.from(new Set((t.usados[n] || []).concat(atual)));
+  t.plano[n] = novos.map(b => b.id);
+  t.tent = t.tent || {}; t.tent[n] = 0;
+  t.lote = t.lote || {}; t.lote[n] = (t.lote[n] || 0) + 1;
+  return novos;
+}
+function trFeitosNoDegrau(n) { return trPlano(n).filter(trFeito).length; }
+const trTent = n => ((TRL().tent || {})[n] || 0);
 /* meta diária pela trilha: começa no mínimo do degrau e sobe aos poucos a cada livro terminado,
    chegando perto da meta do próximo degrau quando a pessoa está pronta para subir */
 function metaTrilha(n, feitos) {
   const t = TRL(); n = n || t.nivel || 1;
   const D = TR_DEGRAUS[n];
   const prox = n < 6 ? TR_DEGRAUS[n + 1].min : 40;
-  const meta = n < 6 ? Math.max(1, Math.min(D.meta, trLivrosDoDegrau(n).length)) : 4;
+  const meta = Math.max(1, trPlano(n).length);
   const f = Math.min(meta, feitos === undefined ? trFeitosNoDegrau(n) : feitos);
   return Math.round(D.min + (prox - D.min) * f / (meta + 1));
 }
 function aplicaMetaTrilha() {
   const t = TRL();
   if (!t.on || !t.nivel || !t.metaAuto) return false;
-  const m = metaTrilha();
+  // dentro do mesmo degrau a meta nunca desce (nem quando chegam livros novos depois do quiz)
+  t.pico = t.pico || {};
+  Object.keys(t.pico).forEach(k => { if (Number(k) > t.nivel) delete t.pico[k]; });
+  const m = Math.max(metaTrilha(), t.pico[t.nivel] || 0);
+  t.pico[t.nivel] = m;
   if (state.settings.goalType === 'minutes' && state.settings.dailyGoal === m) return false;
   const antes = state.settings.goalType === 'minutes' ? state.settings.dailyGoal : 0;
   state.settings.goalType = 'minutes'; state.settings.dailyGoal = m;
   return antes ? m - antes : true;
 }
-// sobe de degrau quando terminar livros suficientes do degrau atual
+/* acompanha o progresso: a meta diária sobe a cada livro, e quando todos os livros do degrau
+   estiverem lidos, chama para o quiz (é ele que libera o próximo degrau) */
 function trConfereSubida() {
   const t = TRL(); if (!t.on || !t.nivel) return;
-  let subiu = false;
-  while (t.nivel < 6 && trFeitosNoDegrau(t.nivel) >= TR_DEGRAUS[t.nivel].meta) {
-    t.nivel++; subiu = true;
-    const D = TR_DEGRAUS[t.nivel];
-    CEL.fila.push({ tipo: 'trilha', e: D.e, nome: 'Novo degrau: ' + D.n, desc: `Você agora é ${D.leitor}. Os próximos livros são um pouquinho mais ricos${t.metaAuto ? `, e sua meta diária passa a ser ${metaTrilha(t.nivel, 0)} minutos` : ''}.` });
+  const n = t.nivel, plano = trPlano(n);
+  const pronto = !t.completa && plano.length && plano.every(trFeito);
+  const chave = n + ':' + plano.map(b => b.id).join(',');
+  let salvar = false;
+  if (pronto && t.avisoQuiz !== chave) {
+    t.avisoQuiz = chave; salvar = true;
+    CEL.fila.push({ tipo: 'trilha', e: '📝', nome: 'Hora do quiz!', desc: `Você leu todos os livros de “${TR_DEGRAUS[n].n}”. Faça o quiz sobre eles na aba Trilha: acertando 60%, você sobe de degrau.` });
+    celebra();
   }
   const mudou = aplicaMetaTrilha();
-  if (subiu) {
-    if (!t.metaAuto && state.settings.goalType === 'minutes' && state.settings.dailyGoal < TR_DEGRAUS[t.nivel].min) t.sugerirMeta = TR_DEGRAUS[t.nivel].min;
-    Store.save(state);
-    celebra();
-  } else if (mudou) {
-    Store.save(state);
+  if (mudou) {
+    salvar = true;
     if (typeof mudou === 'number' && mudou > 0) toast(`📈 Sua meta diária subiu para ${state.settings.dailyGoal} minutos. Você está evoluindo!`);
   }
+  if (salvar) Store.save(state);
 }
+function trSobeDegrau() {
+  const t = TRL(), n = t.nivel;
+  t.tent = t.tent || {}; t.tent[n] = 0;
+  t.passou = t.passou || {}; t.passou[n] = Date.now();
+  if (n >= 6) {
+    t.completa = Date.now();
+    CEL.fila.push({ tipo: 'trilha', e: '🏛️', nome: 'Trilha completa!', desc: 'Você passou pelos 6 degraus. Agora você é Leitor mestre: lê qualquer livro que quiser.' });
+  } else {
+    t.nivel = n + 1;
+    const D = TR_DEGRAUS[t.nivel];
+    TRS.res = {};
+    CEL.fila.push({ tipo: 'trilha', e: D.e, nome: 'Novo degrau: ' + D.n, desc: `Você passou no quiz e agora é ${D.leitor}. Os próximos livros são um pouquinho mais ricos${t.metaAuto ? `, e sua meta diária passa a ser ${metaTrilha(t.nivel, 0)} minutos` : ''}.` });
+    aplicaMetaTrilha();
+    if (!t.metaAuto && state.settings.goalType === 'minutes' && state.settings.dailyGoal < D.min) t.sugerirMeta = D.min;
+  }
+  Store.save(state); render(); window.scrollTo(0, 0);
+  celebra();
+}
+
+/* ---------- quiz da trilha: perguntas simples da IA sobre os livros lidos ---------- */
+const QZ = { q: [], i: 0, certas: 0, resp: [], contou: false };
+const QZ_MIN = 0.6, QZ_TENT = 3;
+function qzAbre(html) {
+  let f = document.getElementById('qz');
+  if (!f) { document.body.insertAdjacentHTML('beforeend', '<div id="qz" class="av-f qz-f"><div class="av-b qz-b"></div></div>'); f = document.getElementById('qz'); }
+  f.querySelector('.qz-b').innerHTML = html;
+}
+function qzFecha() { const f = document.getElementById('qz'); if (f) f.remove(); render(); }
+function qzIntro() {
+  const t = TRL(), n = t.nivel, livros = trPlano(n), tent = trTent(n);
+  qzAbre(`<div class="qz-top"><span class="qz-tag">Quiz da Trilha · ${esc(TR_DEGRAUS[n].n)}</span><button class="qz-x" data-q="fecha" aria-label="Fechar">✕</button></div>
+    <div class="qz-ic">📝</div><h2>Hora de mostrar o que você leu</h2>
+    <p class="muted">Perguntas simples de múltipla escolha sobre:</p>
+    <ul class="qz-livros">${livros.map(b => `<li><b>${esc(b.t)}</b> <small class="muted">${esc(b.a)}</small></li>`).join('')}</ul>
+    <div class="qz-regras"><div><b>60%</b><small>de acertos para passar</small></div><div><b>${QZ_TENT - tent} de ${QZ_TENT}</b><small>tentativas restantes</small></div><div><b>5</b><small>alternativas por pergunta</small></div></div>
+    <p class="small muted">Se não passar nas 3 tentativas, você ganha livros novos do mesmo nível e faz um quiz novo sobre eles.</p>
+    <div class="av-bts"><button class="btn primary" data-q="gera">Começar o quiz</button></div>`);
+}
+function qzEmbaralha(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+function qzLe(txt) {
+  const a = txt.indexOf('{'), b = txt.lastIndexOf('}');
+  if (a < 0 || b < a) throw new Error('sem JSON');
+  const j = JSON.parse(txt.slice(a, b + 1));
+  const lista = (j.q || j.perguntas || []).map(x => {
+    const ops = (x.o || x.opcoes || []).map(o => String(o).trim()).filter(Boolean);
+    const c = Number(x.c !== undefined ? x.c : x.correta);
+    if (!x.p || ops.length !== 5 || !(c >= 0 && c < 5) || new Set(ops).size !== 5) return null;
+    const certa = ops[c];
+    const emb = qzEmbaralha(ops.slice());
+    return { p: String(x.p).trim(), o: emb, c: emb.indexOf(certa), l: String(x.l || '').trim() };
+  }).filter(Boolean);
+  if (lista.length < 4) throw new Error('poucas perguntas');
+  return lista;
+}
+async function qzGera() {
+  const t = TRL(), n = t.nivel, livros = trPlano(n);
+  const total = Math.max(5, Math.min(8, livros.length * 2 + 1));
+  qzAbre(`<div class="qz-carrega"><div class="qz-spin"></div><b>Preparando suas perguntas…</b><span class="muted small">A IA está lendo a lista dos seus livros.</span></div>`);
+  const corpo = { modo: 'quiz', text: livros.map(b => `- ${b.t} — ${b.a}`).join('\n'), context: total + '|' + (trTent(n) + 1) + '|' + Math.random().toString(36).slice(2, 7), title: 'Quiz da Trilha', author: '' };
+  let ultimo = '';
+  for (let k = 0; k < 2; k++) {
+    try {
+      const r = await api('/api/ai', { method: 'POST', body: JSON.stringify(corpo) });
+      const q = qzLe(String((await r.json()).text || ''));
+      Object.assign(QZ, { q: q.slice(0, total), i: 0, certas: 0, resp: [], contou: false });
+      return qzPergunta();
+    } catch (e) { ultimo = e.message; }
+  }
+  qzAbre(`<div class="qz-ic">😕</div><h2>Não consegui montar o quiz agora</h2><p class="muted">A IA não respondeu direito${/sem JSON|poucas/.test(ultimo) ? '' : ' (' + esc(ultimo) + ')'}. Isso não gasta nenhuma tentativa.</p>
+    <div class="av-bts"><button class="btn primary" data-q="gera">Tentar de novo</button><button class="btn" data-q="fecha">Fechar</button></div>`);
+}
+function qzPergunta() {
+  const q = QZ.q[QZ.i], tot = QZ.q.length;
+  qzAbre(`<div class="qz-top"><span class="qz-tag">Pergunta ${QZ.i + 1} de ${tot}</span><button class="qz-x" data-q="fecha" aria-label="Fechar">✕</button></div>
+    <div class="mbar" style="margin:.2rem 0 1rem"><i style="width:${Math.round(QZ.i / tot * 100)}%"></i></div>
+    ${q.l ? `<small class="muted">${esc(q.l)}</small>` : ''}<h3 class="qz-p">${esc(q.p)}</h3>
+    <div class="qz-ops">${q.o.map((o, k) => `<button class="qz-op" data-q="resp" data-k="${k}"><span>${'ABCDE'[k]}</span>${esc(o)}</button>`).join('')}</div>`);
+}
+function qzResponde(k) {
+  const t = TRL(), n = t.nivel, q = QZ.q[QZ.i];
+  if (!QZ.contou) { QZ.contou = true; t.tent = t.tent || {}; t.tent[n] = trTent(n) + 1; Store.save(state); }  // começou a responder: conta a tentativa
+  const ok = k === q.c; if (ok) QZ.certas++;
+  QZ.resp.push({ ok, k });
+  const bts = document.querySelectorAll('#qz .qz-op');
+  bts.forEach((b, i) => { b.disabled = true; if (i === q.c) b.classList.add('certa'); else if (i === k) b.classList.add('errada'); });
+  setTimeout(() => { QZ.i++; if (QZ.i < QZ.q.length) qzPergunta(); else qzFim(); }, ok ? 700 : 1500);
+}
+function qzFim() {
+  const t = TRL(), n = t.nivel, tot = QZ.q.length, pct = Math.round(QZ.certas / tot * 100), passou = QZ.certas / tot >= QZ_MIN;
+  t.quiz = t.quiz || []; t.quiz.push({ n, em: Date.now(), certas: QZ.certas, tot, passou });
+  if (t.quiz.length > 40) t.quiz = t.quiz.slice(-40);
+  const erros = QZ.q.map((q, i) => ({ q, r: QZ.resp[i] })).filter(x => x.r && !x.r.ok);
+  const revisao = erros.length ? `<details class="qz-rev"><summary>Ver as ${erros.length} que você errou</summary>${erros.map(x => `<p><b>${esc(x.q.p)}</b><br>✓ ${esc(x.q.o[x.q.c])}</p>`).join('')}</details>` : '';
+  const placar = `<div class="qz-placar ${passou ? 'ok' : ''}"><b>${QZ.certas} de ${tot}</b><span>${pct}% de acertos</span></div>`;
+  if (passou) {
+    Store.save(state);
+    qzAbre(`<div class="qz-ic">🎉</div><h2>Você passou!</h2>${placar}<p class="muted">Leu, entendeu e mostrou. ${n < 6 ? 'O próximo degrau está liberado.' : 'Você chegou ao fim da trilha!'}</p>${revisao}
+      <div class="av-bts"><button class="btn primary" data-q="sobe">${n < 6 ? 'Subir de degrau' : 'Concluir a trilha'}</button></div>`);
+    return;
+  }
+  const resta = QZ_TENT - trTent(n);
+  if (resta > 0) {
+    Store.save(state);
+    qzAbre(`<div class="qz-ic">💪</div><h2>Quase lá</h2>${placar}<p class="muted">Você precisa de 60% para passar. ${resta === 1 ? 'Ainda resta 1 tentativa' : `Ainda restam ${resta} tentativas`}, com perguntas novas. Se quiser, releia os trechos que ficaram confusos antes de tentar.</p>${revisao}
+      <div class="av-bts"><button class="btn primary" data-q="gera">Tentar de novo</button><button class="btn" data-q="fecha">Depois</button></div>`);
+    return;
+  }
+  const novos = trNovosLivros(n);
+  Store.save(state);
+  qzAbre(`<div class="qz-ic">📚</div><h2>Não foi dessa vez, e tudo bem</h2>${placar}<p class="muted">Você usou as 3 tentativas. Separei <b>livros novos do mesmo nível</b> para você continuar treinando. Quando ler todos, faça o quiz sobre eles para subir de degrau.</p>
+    <ul class="qz-livros">${novos.map(b => `<li><b>${esc(b.t)}</b> <small class="muted">${esc(b.a)}</small></li>`).join('')}</ul>${revisao}
+    <div class="av-bts"><button class="btn primary" data-q="fecha">Ver meus livros novos</button></div>`);
+}
+document.addEventListener('click', e => {
+  const el = e.target.closest('#qz [data-q]'); if (!el) return;
+  const a = el.dataset.q;
+  if (a === 'fecha') {
+    if (QZ.contou && QZ.i < QZ.q.length) {
+      confirma('Sair do quiz?', 'Esta tentativa já está contando. Se sair agora, ela é perdida.', { ic: '📝', ok: 'Sair', nao: 'Continuar o quiz' }).then(ok => { if (ok) { QZ.i = QZ.q.length; qzFim(); } });
+      return;
+    }
+    qzFecha();
+  }
+  else if (a === 'gera') qzGera();
+  else if (a === 'resp') qzResponde(Number(el.dataset.k));
+  else if (a === 'sobe') { qzFecha(); trSobeDegrau(); }
+});
 
 /* acha o livro numa biblioteca gratuita (Gutenberg e, se não tiver lá, a Wikisource) */
 async function trResolve(b) {
@@ -4574,7 +4848,7 @@ async function trResolveVisiveis(lista) {
 }
 function trAct(b) {
   const feito = trFeito(b);
-  const marca = feito ? '<span class="trok">✓ Lido</span>' : `<button class="btn sm" data-g="trfeito" data-id="${b.id}">Já li</button>`;
+  const marca = feito ? '<span class="trok">✓ Lido</span>' : `<button class="btn sm" data-g="trfeito" data-id="${b.id}">Já li</button><button class="btn sm ghost" data-g="trtroca" data-id="${b.id}" title="Trocar por outro livro do mesmo nível">Trocar</button>`;
   const r = TRS.res[b.id] !== undefined ? TRS.res[b.id] : (TRL().gids[b.id] || undefined);
   if (r === undefined) return `<span class="muted small">Procurando nas bibliotecas…</span>${marca}`;
   if (r && r !== -1 && GCACHE[r]) return tileAct(GCACHE[r]) + marca;
@@ -4612,10 +4886,18 @@ function renderTrilha() {
   if (!t.resp || !t.nivel) return trPerguntas();
   trConfereSubida();
   const nv = t.nivel, D = TR_DEGRAUS[nv], fr = freqReal();
-  const lista = trLivrosDoDegrau(nv);
-  const feitos = lista.filter(trFeito).length, meta = Math.min(D.meta, lista.length);
+  const lista = trPlano(nv);
+  const feitos = lista.filter(trFeito).length, meta = lista.length;
   setTimeout(() => trResolveVisiveis(lista), 0);
-  const prox = nv < 6 ? trLivrosDoDegrau(nv + 1).slice(0, 3) : [];
+  const prox = nv < 6 ? trLivrosDoDegrau(nv + 1).slice(0, TR_DEGRAUS[nv + 1].meta) : [];
+  const tent = trTent(nv), lote = (t.lote || {})[nv] || 0, pronto = feitos >= meta && meta > 0;
+  const quizCard = t.completa
+    ? `<section class="card trquiz ok"><div class="tremoji">🏛️</div><div><b>Trilha completa!</b><p class="muted small" style="margin:.2rem 0 0">Você passou pelos 6 degraus. Continue lendo o que quiser: a biblioteca inteira é sua.</p></div></section>`
+    : pronto
+      ? `<section class="card trquiz pronto"><div class="tremoji">📝</div><div style="flex:1"><b>Você leu todos os livros! Agora é o quiz</b>
+          <p class="muted small" style="margin:.2rem 0 .6rem">Perguntas simples sobre os livros que você leu. Acerte 60% para ${nv < 6 ? 'subir de degrau' : 'concluir a trilha'}. ${tent ? `Tentativas usadas: ${tent} de ${QZ_TENT}.` : 'Você tem 3 tentativas.'}</p>
+          <button class="btn primary" data-g="trquiz">${tent ? 'Tentar o quiz de novo' : 'Fazer o quiz'}</button></div></section>`
+      : `<section class="card trquiz"><div class="tremoji">🔒</div><div><b>Quiz do degrau</b><p class="muted small" style="margin:.2rem 0 0">Leia ${meta === 1 ? 'o livro' : `os ${meta} livros`} abaixo para liberar o quiz (faltam ${meta - feitos}). Acertando 60% das perguntas, você sobe de degrau.</p></div></section>`;
   const dicas = {
     1: 'Leia um conto por vez, sem pressa. Terminou? Marque como lido e escolha o próximo.',
     2: 'Achou uma palavra estranha? Selecione e toque em ✨ Significado. Isso vai acontecer mais daqui pra frente, e tudo bem.',
@@ -4632,13 +4914,13 @@ function renderTrilha() {
     <div class="trnums">
       <div><b>${esc(fr.rot)}</b><small>Frequência real · ${fr.dias} ${fr.dias === 1 ? 'dia' : 'dias'} com leitura nos últimos 30</small></div>
       <div><b>${esc(FREQ_DECL[t.resp.freq] || '')}</b><small>Como você lia quando começou</small></div>
-      <div><b>${feitos} de ${meta}</b><small>${nv < 6 ? 'livros deste degrau para subir' : 'livros lidos no último degrau'}</small></div>
+      <div><b>${feitos} de ${meta}</b><small>livros lidos para liberar o quiz</small></div>
     </div>
     <div class="mbar"><i style="width:${Math.min(100, Math.round(feitos / Math.max(1, meta) * 100))}%"></i></div>
     ${(() => {
       const mt = metaTrilha(nv, feitos), mprox = feitos < meta ? metaTrilha(nv, feitos + 1) : (nv < 6 ? metaTrilha(nv + 1, 0) : mt);
       if (t.metaAuto) return `<div class="trmeta"><div><small class="muted">Meta diária da trilha</small><b>${state.settings.dailyGoal} min por dia</b>
-        <small class="muted">${mprox > mt ? `Sobe para ${mprox} min quando você terminar o próximo livro.` : 'Você está no ritmo máximo da trilha. 💪'}</small></div>
+        <small class="muted">${feitos < meta ? `Sobe para ${mprox} min quando você terminar o próximo livro.` : (nv < 6 ? `Passando no quiz, sobe para ${mprox} min.` : 'Você está no ritmo máximo da trilha. 💪')}</small></div>
         <button class="btn sm" data-g="trmetaoff">Usar meta própria</button></div>`;
       return `<div class="trmeta"><div><small class="muted">Meta diária</small><b>${state.settings.dailyGoal} ${unitLabel()} por dia (sua)</b>
         <small class="muted">Pela trilha seria ${mt} min, subindo aos poucos a cada livro.</small></div>
@@ -4648,15 +4930,15 @@ function renderTrilha() {
     ${sug ? `<div class="trsug">Você subiu de degrau! Que tal aumentar a meta diária para <b>${t.sugerirMeta} minutos</b>? <button class="btn sm primary" data-g="trmeta">Aumentar</button><button class="btn sm" data-g="trmetanao">Agora não</button></div>` : ''}
     ${!t.on ? '<div class="trsug">A trilha está pausada. <button class="btn sm primary" data-g="trligar">Retomar trilha</button></div>' : ''}
   </section>
-  <h3 class="sechead">${D.e} ${esc(D.n)} <span class="muted small">${esc(D.d)}</span></h3>
+  ${quizCard}
+  <h3 class="sechead">${D.e} ${lote ? 'Seus livros novos' : 'Seus livros deste degrau'} <span class="muted small">${esc(D.d)}</span></h3>
   <div class="brgrid">${lista.map((b, i) => trCard(b, i, true)).join('')}</div>
-  ${prox.length ? `<h3 class="sechead">🔒 Próximo degrau: ${esc(TR_DEGRAUS[nv + 1].n)}</h3><p class="muted small" style="margin:-.3rem 0 .7rem">${esc(TR_DEGRAUS[nv + 1].d)} Libera quando você ler ${D.meta} livros deste degrau.</p>
+  ${prox.length ? `<h3 class="sechead">🔒 Próximo degrau: ${esc(TR_DEGRAUS[nv + 1].n)}</h3><p class="muted small" style="margin:-.3rem 0 .7rem">${esc(TR_DEGRAUS[nv + 1].d)} Libera quando você passar no quiz deste degrau.</p>
     <div class="trprox">${prox.map(b => `<div><b>${esc(b.t)}</b><small>${esc(b.a)}</small></div>`).join('')}</div>` : ''}
   <section class="card" style="margin-top:1.2rem"><h2>Ajustar a trilha</h2>
     <p class="muted small" style="margin-top:0">Os livros são escolhidos pelos seus gostos (${esc(((state.profile && state.profile.genres) || []).map(genreLabel).filter(Boolean).join(', ') || 'nenhum escolhido')}) e pelos idiomas que você lê.</p>
     <div class="bookact">
       ${nv > 1 ? '<button class="btn" data-g="trdesce">Está difícil: voltar um degrau</button>' : ''}
-      ${nv < 6 ? '<button class="btn" data-g="trsobe">Está fácil: pular um degrau</button>' : ''}
       <button class="btn" data-g="trrefaz">Refazer as perguntas</button>
       ${t.on ? '<button class="btn" data-g="trpausa">Pausar trilha</button>' : ''}
     </div></section>`;
@@ -4669,11 +4951,11 @@ VIEWS.today = function () {
   let c = '';
   if (!t.resp) c = `<section class="card trmini"><div class="tremoji">🧭</div><div><b>Descubra seu nível de leitor</b><p class="muted small" style="margin:.2rem 0 .5rem">Responda 2 perguntas e receba uma trilha de livros que fica mais desafiadora aos poucos.</p><button class="btn sm primary" data-x="go" data-v="trilha">Começar</button></div></section>`;
   else if (t.on && t.nivel) {
-    const D = TR_DEGRAUS[t.nivel], lista = trLivrosDoDegrau(t.nivel), f = lista.filter(trFeito).length;
+    const D = TR_DEGRAUS[t.nivel], lista = trPlano(t.nivel), f = lista.filter(trFeito).length;
     const lendo = lista.find(b => { const g = t.gids[b.id]; const sb = g && shelfBook(g); return sb && sb.status === 'reading'; });
-    c = `<section class="card trmini"><div class="tremoji">${D.e}</div><div style="flex:1"><small class="muted">Trilha do Leitor · ${esc(D.leitor)}</small><b style="display:block">${lendo ? 'Continue: ' + esc(lendo.t) : esc(D.n) + ` · ${f} de ${Math.min(D.meta, lista.length)} livros`}</b>
-      <div class="mbar" style="margin:.4rem 0 .5rem"><i style="width:${Math.min(100, Math.round(f / Math.max(1, Math.min(D.meta, lista.length)) * 100))}%"></i></div>
-      <button class="btn sm primary" data-x="go" data-v="trilha">Abrir trilha</button></div></section>`;
+    c = `<section class="card trmini"><div class="tremoji">${D.e}</div><div style="flex:1"><small class="muted">Trilha do Leitor · ${esc(D.leitor)}</small><b style="display:block">${t.completa ? 'Trilha completa 🏛️' : f >= lista.length ? '📝 Livros lidos: hora do quiz!' : lendo ? 'Continue: ' + esc(lendo.t) : esc(D.n) + ` · ${f} de ${lista.length} livros`}</b>
+      <div class="mbar" style="margin:.4rem 0 .5rem"><i style="width:${Math.min(100, Math.round(f / Math.max(1, lista.length) * 100))}%"></i></div>
+      <button class="btn sm primary" data-x="go" data-v="trilha">${!t.completa && f >= lista.length ? 'Fazer o quiz' : 'Abrir trilha'}</button></div></section>`;
   }
   const h = _vTodayTr();
   return c ? h.replace('</section>', '</section>' + c) : h;
@@ -4695,7 +4977,18 @@ document.addEventListener('click', e => {
       break;
     }
     case 'trfeito': { t.feitos[id] = Date.now(); Store.save(state); render(); break; }
-    case 'trsobe': if (t.nivel < 6) { t.nivel++; TRS.res = {}; aplicaMetaTrilha(); Store.save(state); render(); window.scrollTo(0, 0); } break;
+    case 'trquiz': if (trTent(t.nivel) >= QZ_TENT) { trNovosLivros(t.nivel); Store.save(state); render(); break; } qzIntro(); break;
+    case 'trtroca': {
+      const n = t.nivel, ids = (t.plano && t.plano[n]) || [];
+      const usados = new Set(((t.usados || {})[n] || []).concat(ids));
+      const opc = trLivrosDoDegrau(n).filter(b => !ids.includes(b.id) && !trFeito(b));
+      const novo = opc.find(b => !usados.has(b.id)) || opc[0];
+      if (!novo) { toast('Não há outro livro deste nível para trocar.'); break; }
+      t.usados = t.usados || {}; t.usados[n] = Array.from(new Set((t.usados[n] || []).concat([id])));
+      t.plano[n] = ids.map(x => x === id ? novo.id : x);
+      Store.save(state); render(); toast(`Trocado por “${novo.t}”.`);
+      break;
+    }
     case 'trdesce': if (t.nivel > 1) { t.nivel--; TRS.res = {}; aplicaMetaTrilha(); Store.save(state); render(); window.scrollTo(0, 0); } break;
     case 'trrefaz': t.resp = null; t.nivel = 0; Store.save(state); render(); window.scrollTo(0, 0); break;
     case 'trpausa': t.on = false; Store.save(state); render(); break;
@@ -4844,6 +5137,22 @@ setTimeout(function inicioTr() {
 .atu-ic{font-size:1.6rem}.atu-tx{flex:1;min-width:0}.atu-tx span{display:block;font-size:.85rem;color:var(--muted);margin-top:2px}
 .atu-bts{display:flex;gap:8px;flex:none}
 @keyframes atuSobe{from{transform:translate(-50%,40px);opacity:0}}
+.av-f{position:fixed;inset:0;z-index:120;display:grid;place-items:center;padding:16px;background:rgba(0,0,0,.45);backdrop-filter:blur(3px);animation:avF .2s ease}
+.av-f.saindo{opacity:0;transition:opacity .16s}
+.av-b{width:min(440px,100%);padding:18px;border:1px solid var(--accent);border-radius:20px;background:var(--card);color:var(--ink);box-shadow:0 24px 60px -12px rgba(0,0,0,.55);animation:atuSobe2 .35s cubic-bezier(.2,1.2,.4,1)}
+.av-top{display:flex;gap:12px;align-items:flex-start}
+.av-ic{font-size:1.7rem;line-height:1;flex:none;width:2.6rem;height:2.6rem;display:grid;place-items:center;border-radius:14px;background:color-mix(in srgb,var(--accent) 15%,transparent)}
+.av-tx{flex:1;min-width:0}.av-tx b{display:block;font-size:1.05rem;line-height:1.3}.av-tx span{display:block;font-size:.9rem;color:var(--muted);margin-top:5px;line-height:1.45;white-space:pre-line}
+.av-cs{display:flex;flex-direction:column;gap:10px;margin-top:14px}
+.av-c{display:flex;flex-direction:column;gap:5px;font-size:.85rem;color:var(--muted)}
+.av-c input,.av-c textarea{font:inherit;font-size:1rem;color:var(--ink);background:var(--bg);border:1px solid color-mix(in srgb,var(--ink) 20%,transparent);border-radius:12px;padding:.65rem .75rem;resize:vertical}
+.av-bts{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
+.av-bts .btn{padding:.7rem 1.1rem}
+.btn.perigo{background:#c0392b;color:#fff;border-color:#c0392b}
+@keyframes avF{from{opacity:0}}
+@keyframes atuSobe2{from{transform:translateY(30px) scale(.97);opacity:0}}
+@media(max-width:560px){.av-f{place-items:end center;padding:10px}.av-bts .btn{flex:1;padding:.8rem}}
+
 @media(max-width:760px){.atu-b{flex-wrap:wrap;width:calc(100vw - 20px);bottom:10px;padding:16px}.atu-tx b{font-size:1.02rem}.atu-bts{width:100%}.atu-bts .btn{flex:1;padding:.75rem}.atu-bts .btn:last-child{flex:0 0 auto}}
 </style>
 </body>

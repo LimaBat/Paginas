@@ -178,6 +178,16 @@ jobs:
               $ia = Invoke-RestMethod "$b/api/ai?t=$tk" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes('{"text":"outrem","context":"amar a outrem como a si mesmo","title":"Dom Casmurro","author":"Machado de Assis"}'))
               Write-Host "IA: $($ia.text)"
             } catch { Write-Host "::warning::A IA não respondeu no teste: $($_.Exception.Message)" }
+            try {
+              $corpoQ = '{"modo":"quiz","text":"- O Alienista \u2014 Machado de Assis\n- A Cartomante \u2014 Machado de Assis\n- O Homem que Sabia Javan\u00eas \u2014 Lima Barreto","context":"7|1|teste","title":"Quiz da Trilha","author":""}'
+              $qz = Invoke-RestMethod "$b/api/ai?t=$tk" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($corpoQ)) -TimeoutSec 120
+              $tq = [string]$qz.text
+              Write-Host "QUIZ bruto: $tq"
+              $jq = $tq.Substring($tq.IndexOf('{'), $tq.LastIndexOf('}') - $tq.IndexOf('{') + 1) | ConvertFrom-Json
+              $boas = @($jq.q | Where-Object { $_.p -and @($_.o).Count -eq 5 -and [int]$_.c -ge 0 -and [int]$_.c -le 4 })
+              Write-Host "QUIZ: $(@($jq.q).Count) perguntas, $($boas.Count) válidas"
+              if ($boas.Count -lt 4) { Write-Host "::warning::O quiz da IA veio com poucas perguntas válidas ($($boas.Count))" }
+            } catch { Write-Host "::warning::O quiz da IA falhou no teste: $($_.Exception.Message)" }
           } else { Write-Host "::warning::Sem o segredo IA_PROXY_URL: a IA não vai funcionar nesta versão." }
           Invoke-RestMethod "$b/api/notif?t=$tk" -Method Post -ContentType 'application/json' -Body '{"on":true,"horas":["09:00","20:30"]}' | Out-Null
           $tarefa = Get-ScheduledTask -TaskName 'Paginas - Reflexoes' -ErrorAction SilentlyContinue
