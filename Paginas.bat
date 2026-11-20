@@ -941,6 +941,11 @@ dialog form{display:flex;flex-direction:column;gap:.8rem}
 .reader.calmo .rhead>.rtitle{opacity:.35}
 .reader.calmo{cursor:none}
 .rtitle{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+/* nome do livro e autor sempre no meio da tela (não no canto esquerdo) */
+.rhead{position:relative}
+.rhead>.rtitle{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:max-content;max-width:calc(100% - 2*var(--rlado,330px));text-align:center;pointer-events:none}
+.rhead>.rtitle+*{margin-left:auto}
+@media(max-width:900px){.rhead{flex-wrap:wrap}.rhead>.rtitle{position:static;transform:none;order:-1;flex:1 0 100%;max-width:100%;width:auto}.rhead>.rtitle+*{margin-left:0}.rhead>[data-x=rclose]{margin-right:auto}}
 .reader .btn{background:transparent;color:var(--rink);border-color:var(--rline)}
 .reader .btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
 .reader .btn:disabled{opacity:.4;cursor:default}
@@ -5061,6 +5066,22 @@ finishBook = function (bid) { const r = _finishBookTr.apply(this, arguments); se
     if (ev === 'mousemove' && e.movementX === 0 && e.movementY === 0) return;  // a página mudou embaixo do mouse parado
     mostra();
   }, { passive: true }));
+  // título centralizado: mede quanto espaço os botões ocupam de cada lado para o nome nunca ficar por cima deles
+  function ajustaTitulo() {
+    const h = document.querySelector('#reader .rhead'), t = h && h.querySelector('.rtitle');
+    if (!h || !t || innerWidth <= 900) return;
+    const r = h.getBoundingClientRect();
+    let esq = 0, dir = 0;
+    [...h.children].forEach(c => {
+      if (c === t) return;
+      const b = c.getBoundingClientRect();
+      if (b.left + b.width / 2 < r.left + r.width / 2) esq = Math.max(esq, b.right - r.left);
+      else dir = Math.max(dir, r.right - b.left);
+    });
+    h.style.setProperty('--rlado', (Math.max(esq, dir) + 16) + 'px');
+  }
+  new MutationObserver(ajustaTitulo).observe(document.getElementById('reader'), { childList: true });
+  addEventListener('resize', ajustaTitulo);
   // quando o leitor abre, começa a contar
   new MutationObserver(() => { const r = rd(); if (r && !r.hidden) mostra(); else { clearTimeout(tm); if (r) r.classList.remove('calmo'); } })
     .observe(document.getElementById('reader'), { attributes: true, attributeFilter: ['hidden'] });
