@@ -671,7 +671,8 @@ try {
       if (-not $cfg.apiKey -and -not $IA_PROXY_URL) { Send-Json $ctx 400 '{"error":"Configure sua chave de IA em Ajustes."}'; return }
       $in = (Read-Body $req) | ConvertFrom-Json
       $sel = [string]$in.text
-      if ($sel.Length -lt 1 -or $sel.Length -gt 1500) { Send-Json $ctx 400 '{"error":"Trecho invalido (use ate 1500 caracteres)."}'; return }
+      $limSel = 1500; if ([string]$in.modo -eq 'quiz') { $limSel = 26000 }
+      if ($sel.Length -lt 1 -or $sel.Length -gt $limSel) { Send-Json $ctx 400 '{"error":"Trecho invalido (use ate 1500 caracteres)."}'; return }
       $cx = [string]$in.context
       if ($cx.Length -gt 3000) { $cx = $cx.Substring(0, 3000) }
       $bt = [string]$in.title
@@ -684,8 +685,8 @@ try {
         $pq = ([string]$cx).Split('|')
         $nq = 6; if ($pq.Length -gt 0 -and $pq[0] -match '^\d+$') { $nq = [Math]::Min(10, [int]$pq[0]) }
         $tq = '1'; if ($pq.Length -gt 1) { $tq = $pq[1] }
-        $sys = 'Você cria quizzes de leitura para quem está criando o hábito de ler. Responda SOMENTE com JSON válido, sem nenhum texto antes ou depois, no formato {"q":[{"l":"título do livro","p":"pergunta","o":["alternativa 1","alternativa 2","alternativa 3","alternativa 4","alternativa 5"],"c":0}]}. Faça perguntas SIMPLES e objetivas sobre o enredo, os personagens principais, o desfecho e a ideia central de cada livro da lista: coisas que qualquer pessoa que leu o livro com atenção sabe responder. Não pergunte datas, números de capítulos, nomes de personagens secundários nem detalhes minúsculos. Só pergunte o que você tem certeza de que acontece no livro. Cada pergunta tem exatamente 5 alternativas curtas (até 12 palavras), diferentes entre si e plausíveis, com uma única correta; "c" é a posição (0 a 4) da correta. Distribua as perguntas entre todos os livros. Escreva em português do Brasil.'
-        $usr = "Livros que a pessoa leu:`n" + $sel + "`n`nCrie exatamente " + $nq + " perguntas no total. Esta é a tentativa " + $tq + " (código " + $(if ($pq.Length -gt 2) { $pq[2] } else { '' }) + "): faça perguntas diferentes das que faria numa tentativa anterior."
+        $sys = 'Você cria quizzes de leitura para quem está criando o hábito de ler. Responda SOMENTE com JSON válido, sem nenhum texto antes ou depois, no formato {"q":[{"l":"título do livro","p":"pergunta","o":["alternativa 1","alternativa 2","alternativa 3","alternativa 4","alternativa 5"],"c":0}]}. Faça perguntas SIMPLES e objetivas sobre o enredo, os personagens principais, o desfecho e a ideia central de cada livro da lista: coisas que qualquer pessoa que leu o livro com atenção sabe responder. Não pergunte datas, números de capítulos, nomes de personagens secundários nem detalhes minúsculos. Só pergunte o que você tem certeza de que acontece no livro. Cada pergunta tem exatamente 5 alternativas curtas (até 12 palavras), diferentes entre si e plausíveis, com uma única correta; "c" é a posição (0 a 4) da correta. Distribua as perguntas entre todos os livros. Escreva em português do Brasil. Quando houver TRECHOS DO LIVRO, baseie TODAS as perguntas e respostas só no que está escrito nesses trechos (o enredo, quem faz o quê, como termina), sem inventar nada que não esteja neles; a alternativa correta precisa ser confirmada pelo texto.'
+        $usr = "Livros que a pessoa leu:`n`n" + $sel + "`n`nCrie exatamente " + $nq + " perguntas no total. Esta é a tentativa " + $tq + " (código " + $(if ($pq.Length -gt 2) { $pq[2] } else { '' }) + "): faça perguntas diferentes das que faria numa tentativa anterior."
         $maxTok = 2000
       }
       if (-not $cfg.apiKey) {
@@ -4742,11 +4743,35 @@ function qzLe(txt) {
   if (lista.length < 4) throw new Error('poucas perguntas');
   return lista;
 }
+/* trechos do texto de cada livro, espalhados do começo ao fim (inclui o desfecho),
+   para a IA perguntar só sobre o que está no livro de verdade */
+async function qzTrechos(b, limite) {
+  const t = TRL(), gid = t.gids[b.id];
+  if (!gid || gid === -1) return '';
+  const obj = shelfBook(gid) || GCACHE[gid];
+  if (!obj) return '';
+  let tx = '';
+  try { tx = await textoDoLivro(Object.assign({ gid }, obj)); } catch (e) { return ''; }
+  tx = String(tx || '').replace(/\r/g, '');
+  const ini = tx.search(/\*\*\* ?START OF/i); if (ini >= 0) tx = tx.slice(tx.indexOf('\n', ini) + 1);
+  const fim = tx.search(/\*\*\* ?END OF/i); if (fim > 0) tx = tx.slice(0, fim);
+  tx = tx.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  if (tx.length <= limite) return tx;
+  const partes = 7, tam = Math.floor(limite / partes), out = [];
+  for (let i = 0; i < partes; i++) {
+    const pos = i === partes - 1 ? tx.length - tam : Math.floor((tx.length - tam) * i / (partes - 1));
+    out.push(tx.slice(pos, pos + tam));
+  }
+  return out.join('\n[…]\n');
+}
 async function qzGera() {
   const t = TRL(), n = t.nivel, livros = trPlano(n);
   const total = Math.max(5, Math.min(8, livros.length * 2 + 1));
-  qzAbre(`<div class="qz-carrega"><div class="qz-spin"></div><b>Preparando suas perguntas…</b><span class="muted small">A IA está lendo a lista dos seus livros.</span></div>`);
-  const corpo = { modo: 'quiz', text: livros.map(b => `- ${b.t} — ${b.a}`).join('\n'), context: total + '|' + (trTent(n) + 1) + '|' + Math.random().toString(36).slice(2, 7), title: 'Quiz da Trilha', author: '' };
+  qzAbre(`<div class="qz-carrega"><div class="qz-spin"></div><b>Preparando suas perguntas…</b><span class="muted small">A IA está relendo trechos dos seus livros.</span></div>`);
+  const limite = Math.floor(21000 / Math.max(1, livros.length));
+  const textos = await Promise.all(livros.map(b => qzTrechos(b, limite)));
+  const lista = livros.map((b, i) => `### ${b.t} — ${b.a}\n` + (textos[i] ? `TRECHOS DO LIVRO:\n${textos[i]}` : '(sem o texto: pergunte só o que é muito conhecido deste livro)')).join('\n\n');
+  const corpo = { modo: 'quiz', text: lista, context: total + '|' + (trTent(n) + 1) + '|' + Math.random().toString(36).slice(2, 7), title: 'Quiz da Trilha', author: '' };
   let ultimo = '';
   for (let k = 0; k < 2; k++) {
     try {
