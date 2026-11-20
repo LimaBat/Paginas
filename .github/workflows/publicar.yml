@@ -38,6 +38,9 @@ jobs:
       - name: Testar as bibliotecas (Wikisource e Internet Archive de verdade)
         continue-on-error: true
         run: node ferramentas/testar_fontes.mjs
+      - name: Testar o quiz da Trilha com a IA (texto real)
+        continue-on-error: true
+        run: node ferramentas/testar_quiz.mjs
       - name: Publicar na Cloudflare
         id: pub
         if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
