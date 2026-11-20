@@ -933,6 +933,9 @@ dialog form{display:flex;flex-direction:column;gap:.8rem}
 .rhead,.rfoot{display:flex;align-items:center;gap:.6rem;padding:.6rem 1rem}
 .rhead{border-bottom:1px solid var(--rline)}
 .rfoot{border-top:1px solid var(--rline)}
+.rhead,.rfoot{transition:opacity .45s ease,border-color .45s ease}
+.reader.calmo .rhead,.reader.calmo .rfoot{opacity:0;pointer-events:none;border-color:transparent}
+.reader.calmo{cursor:none}
 .rtitle{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
 .reader .btn{background:transparent;color:var(--rink);border-color:var(--rline)}
 .reader .btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
@@ -2171,7 +2174,8 @@ let R = null;
 const rprefs = () => Object.assign({ size: 19, theme: 'sepia' }, state.prefs || {});
 function readerShell(inner, theme) {
   const el = $('#reader');
-  el.className = 'reader th-' + (theme || rprefs().theme);
+  const calmo = !el.hidden && el.classList.contains('calmo');  // virar a página com o teclado não traz as barras de volta
+  el.className = 'reader th-' + (theme || rprefs().theme) + (calmo ? ' calmo' : '');
   el.hidden = false;
   el.innerHTML = inner;
   document.body.style.overflow = 'hidden';
@@ -5027,6 +5031,36 @@ document.addEventListener('click', e => {
 // ao terminar um livro, confere se sobe de degrau
 const _finishBookTr = finishBook;
 finishBook = function (bid) { const r = _finishBookTr.apply(this, arguments); setTimeout(trConfereSubida, 800); return r; };
+
+/* ---------- leitor sem distração: com o mouse parado por 3 s, as barras de cima e de baixo somem
+   (as setas do teclado viram as páginas sem trazê-las de volta); mexeu o mouse, elas voltam ---------- */
+(function () {
+  const temMouse = matchMedia('(hover: hover) and (pointer: fine)');
+  let tm = null;
+  const rd = () => document.getElementById('reader');
+  function mostra() {
+    const r = rd(); if (!r) return;
+    r.classList.remove('calmo');
+    clearTimeout(tm);
+    if (!temMouse.matches || r.hidden) return;
+    tm = setTimeout(esconde, 3000);
+  }
+  function esconde() {
+    const r = rd(); if (!r || r.hidden) return;
+    // não some com o mouse em cima de uma barra, com texto selecionado ou com algum menu aberto
+    if (r.querySelector('.rhead:hover, .rfoot:hover') || document.getElementById('rtool') || document.getElementById('av-f') ||
+        r.querySelector('.rpop:not([hidden]), .rmenu:not([hidden]), [data-aberto]') || String(getSelection()).trim()) { tm = setTimeout(esconde, 1500); return; }
+    r.classList.add('calmo');
+  }
+  ['mousemove', 'mousedown', 'wheel', 'touchstart'].forEach(ev => document.addEventListener(ev, e => {
+    const r = rd(); if (!r || r.hidden) return;
+    if (ev === 'mousemove' && e.movementX === 0 && e.movementY === 0) return;  // a página mudou embaixo do mouse parado
+    mostra();
+  }, { passive: true }));
+  // quando o leitor abre, começa a contar
+  new MutationObserver(() => { const r = rd(); if (r && !r.hidden) mostra(); else { clearTimeout(tm); if (r) r.classList.remove('calmo'); } })
+    .observe(document.getElementById('reader'), { attributes: true, attributeFilter: ['hidden'] });
+})();
 
 /* ============ Lembrete de leitura que chega com o app fechado ============ */
 // guarda um resumo para o lembrete saber (sem abrir o app) se você já leu hoje
