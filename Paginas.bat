@@ -934,7 +934,11 @@ dialog form{display:flex;flex-direction:column;gap:.8rem}
 .rhead{border-bottom:1px solid var(--rline)}
 .rfoot{border-top:1px solid var(--rline)}
 .rhead,.rfoot{transition:opacity .45s ease,border-color .45s ease}
-.reader.calmo .rhead,.reader.calmo .rfoot{opacity:0;pointer-events:none;border-color:transparent}
+.rhead>*{transition:opacity .45s ease}
+.reader.calmo .rfoot{opacity:0;pointer-events:none;border-color:transparent}
+.reader.calmo .rhead{pointer-events:none;border-color:transparent}
+.reader.calmo .rhead>*{opacity:0}
+.reader.calmo .rhead>.rtitle{opacity:.35}
 .reader.calmo{cursor:none}
 .rtitle{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
 .reader .btn{background:transparent;color:var(--rink);border-color:var(--rline)}
